@@ -52,7 +52,7 @@ def build_dataset_rank(
     # ds2=ds.select(range(300,len(ds)))
     original_columns1 = ds1.column_names
     # original_columns2 = ds2.column_names
-    num_proc = 4
+    num_proc = 8
 
     def preprocess_function(examples):
         new_examples = {
