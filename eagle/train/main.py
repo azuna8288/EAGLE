@@ -7,7 +7,7 @@ parser.add_argument('--lr', type=float, default=3e-5)
 parser.add_argument('--bs', type=int, default=4)
 parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
 parser.add_argument('--tmpdir', type=str, default='0')
-parser.add_argument('--outdir', type=str, default='0')
+# parser.add_argument('--outdir', type=str, default='0')
 parser.add_argument('--cpdir', type=str, default='0')
 args = parser.parse_args()
 
