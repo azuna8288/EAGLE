@@ -299,7 +299,7 @@ def get_model_answers(
                 "tstamp": time.time(),
             }
             fout.write(json.dumps(ans_json) + "\n")
-    print(sum(avg_accept_len_list)/len(avg_accept_len_list))
+        print(sum(avg_accept_len_list)/len(avg_accept_len_list))
 
 def reorg_answer_file(answer_file):
     """Sort by question id and de-duplication"""
