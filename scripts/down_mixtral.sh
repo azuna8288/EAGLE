@@ -1,2 +1,2 @@
-modelscope download --model AI-ModelScope/Mixtral-8x7B-Instruct-v0.1 --local_dir hub/Mixtral-8x7B-Instruct-v0.1
-huggingface-cli download --resume-download yuhuili/EAGLE-mixtral-instruct-8x7B --local-dir hub/EAGLE-mixtral-instruct-8x7B
+modelscope download --model AI-ModelScope/Mixtral-8x7B-Instruct-v0.1 --local_dir EAGLE_files/hub/Mixtral-8x7B-Instruct-v0.1
+huggingface-cli download --resume-download yuhuili/EAGLE-mixtral-instruct-8x7B --local-dir EAGLE_files/hub/EAGLE-mixtral-instruct-8x7B
