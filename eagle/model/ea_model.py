@@ -7,6 +7,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig,AutoConfig
 from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
 from .modeling_mixtral_kv import MixtralForCausalLM as KVMixtralForCausalLM
+from .modeling_p6_kv import P6ForCausalLM as KVP6ForCausalLM
 from .utils import *
 from .kv_cache import initialize_past_key_values
 from .choices import mc_sim_7b_63
@@ -14,7 +15,8 @@ from transformers import AutoTokenizer
 import os
 from huggingface_hub import hf_hub_download
 from .cnets import Model
-from .configs import EConfig
+# from .configs import EConfig
+from seed_models.models.p6.configuration_p6 import P6Config as EConfig
 from huggingface_hub import hf_hub_download
 
 
@@ -47,7 +49,7 @@ class EaModel(nn.Module):
 
         low_memory=False
 
-        device = base_model.model.layers[-1].self_attn.q_proj.weight.device
+        device = base_model.transformer.h[-1].attn.q_proj.weight.device
         if device!=base_model.lm_head.weight.device:
             self.ea_layer.diff_device = True
             if not low_memory:
@@ -85,8 +87,12 @@ class EaModel(nn.Module):
             base_model = KVLlamaForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
-        else:
+        elif Type=='MixtralForCausalLM':
             base_model = KVMixtralForCausalLM.from_pretrained(
+                base_model_path, **kwargs
+            )
+        else:
+            base_model = KVP6ForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
 
@@ -121,7 +127,7 @@ class EaModel(nn.Module):
 
         with torch.inference_mode():
             # Pass input through the base model
-            outputs = self.base_model.model(
+            outputs = self.base_model.transformer(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
@@ -175,7 +181,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)
@@ -275,7 +281,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)
@@ -379,7 +385,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)

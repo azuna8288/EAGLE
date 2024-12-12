@@ -22,18 +22,19 @@ The only difference between P6 and Mixtral modeling is
 1. P6 uses LayerNorm while Mixtral uses RMSNorm
 2. P6 has Key LayerNorm and Context Norm while Mixtral doesn't
 """
-import os
+
 import inspect
 import math
+import os
 import warnings
 from typing import List, Optional, Tuple, Union
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
-from torch.distributed import nn as dist_nn
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
+from torch.distributed import nn as dist_nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
@@ -61,6 +62,7 @@ from .kv_cache import KVCache
 from seed_models.integrations.xperf import XperfGenerationMixin
 from seed_models.utils import _flash_attention_forward, is_fused_moe_available, logging
 from seed_models.utils.modeling_outputs import MoeModelOutputWithPastAndAuxLosses
+from seed_models.utils.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from seed_models.models.p6.configuration_p6 import P6Config
 
 
@@ -90,44 +92,158 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "P6Config"
 
 
+def _make_causal_mask(
+        input_ids_shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+        past_key_values_length: int = 0,
+):
+    """
+    Create a causal mask for bi-directional self-attention.
+
+    Args:
+        input_ids_shape (torch.Size): The shape of input_ids tensor, typically (batch_size, tgt_len).
+        dtype (torch.dtype): The data type of the mask.
+        device (torch.device): The device on which the mask will be placed.
+        past_key_values_length (int, optional): The length of past key values. Default is 0.
+
+    Returns:
+        torch.Tensor: The causal mask tensor.
+    """
+    bsz, tgt_len = input_ids_shape
+    mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+    mask_cond = torch.arange(mask.size(-1), device=device)
+    mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+    mask = mask.to(dtype)
+
+    if past_key_values_length > 0:
+        mask = torch.cat(
+            [
+                torch.zeros(
+                    tgt_len, past_key_values_length, dtype=dtype, device=device
+                ),
+                mask,
+            ],
+            dim=-1,
+        )
+    return mask[None, None, :, :].expand(
+        bsz, 1, tgt_len, tgt_len + past_key_values_length
+    )
+
+
+# Copied from transformers.models.bart.modeling_bart._expand_mask
+def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+    """
+    Expand attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
+
+    Args:
+        mask (torch.Tensor): The attention mask tensor of shape `[bsz, seq_len]`.
+        dtype (torch.dtype): The data type of the mask.
+        tgt_len (Optional[int], optional): The target sequence length. If None, it defaults to the source sequence length.
+
+    Returns:
+        torch.Tensor: The expanded mask tensor.
+    """
+    bsz, src_len = mask.size()
+    tgt_len = tgt_len if tgt_len is not None else src_len
+
+    expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
+
+    inverted_mask = 1.0 - expanded_mask
+
+    return inverted_mask.masked_fill(
+        inverted_mask.to(torch.bool), torch.finfo(dtype).min
+    )
+
+
+
 # Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->P6
 # TODO @Arthur no longer copied from LLama after static cache
 class P6RotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+    def __init__(
+        self,
+        dim=None,
+        max_position_embeddings=2048,
+        base=10000,
+        device=None,
+        scaling_factor=1.0,
+        rope_type="default",
+        config: Optional[P6Config] = None,
+    ):
         super().__init__()
+        # TODO (joao): remove the `if` below, only used for BC
+        self.rope_kwargs = {}
+        if config is None:
+            logger.warning_once(
+                "`P6RotaryEmbedding` can now be fully parameterized by passing the model config through the "
+                "`config` argument. All other arguments will be removed in v4.45"
+            )
+            self.rope_kwargs = {
+                "rope_type": rope_type,
+                "factor": scaling_factor,
+                "dim": dim,
+                "base": base,
+                "max_position_embeddings": max_position_embeddings,
+            }
+            self.rope_type = rope_type
+            self.max_seq_len_cached = max_position_embeddings
+            self.original_max_seq_len = max_position_embeddings
+        else:
+            # BC: "rope_type" was originally "type"
+            if config.rope_scaling is not None:
+                self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+            else:
+                self.rope_type = "default"
+            self.max_seq_len_cached = config.max_position_embeddings
+            self.original_max_seq_len = config.max_position_embeddings
 
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        self.config = config
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.original_inv_freq = self.inv_freq
 
-        # Build here to make `torch.jit.trace` work.
-        self._set_cos_sin_cache(
-            seq_len=max_position_embeddings,
-            device=self.inv_freq.device,
-            dtype=torch.get_default_dtype(),
-        )
+    def _dynamic_frequency_update(self, position_ids, device):
+        """
+        dynamic RoPE layers should recompute `inv_freq` in the following situations:
+        1 - growing beyond the cached sequence length (allow scaling)
+        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
+        """
+        seq_len = torch.max(position_ids) + 1
+        if seq_len > self.max_seq_len_cached:  # growth
+            inv_freq, self.attention_scaling = self.rope_init_fn(
+                self.config, device, seq_len=seq_len, **self.rope_kwargs
+            )
+            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
+            self.max_seq_len_cached = seq_len
 
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
+        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
+            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
+            self.max_seq_len_cached = self.original_max_seq_len
 
-        freqs = torch.outer(t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+    @torch.no_grad()
+    def forward(self, x, position_ids):
+        if "dynamic" in self.rope_type:
+            self._dynamic_frequency_update(position_ids, device=x.device)
 
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+        # Core RoPE block
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
 
-        return (
-            self.cos_cached[:seq_len].to(dtype=x.dtype),
-            self.sin_cached[:seq_len].to(dtype=x.dtype),
-        )
+        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+        cos = cos * self.attention_scaling
+        sin = sin * self.attention_scaling
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -140,7 +256,7 @@ def rotate_half(x):
 
 # copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
 # TODO @Arthur no longer copied from LLama after static cache
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -161,8 +277,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -234,12 +350,6 @@ class P6Attention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
-        self.rotary_emb = P6RotaryEmbedding(
-            self.head_dim,
-            max_position_embeddings=self.max_position_embeddings,
-            base=self.rope_theta,
-        )
-
         if self.config.use_context_groupnorm:
             self.context_norm = nn.LayerNorm(self.head_dim, eps=config.layer_norm_eps)
 
@@ -250,6 +360,8 @@ class P6Attention(nn.Module):
             )
         self.interleaved_kv_shared = self.config.interleaved_kv_shared
 
+        self.rotary_emb = P6RotaryEmbedding(config=self.config)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -258,6 +370,7 @@ class P6Attention(nn.Module):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if "padding_mask" in kwargs:
@@ -265,15 +378,6 @@ class P6Attention(nn.Module):
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
         bsz, q_len, _ = hidden_states.size()
-        past_key_values_length = 0 if not use_cache else past_key_value.get_usable_length(q_len, self.layer_idx)
-
-        attention_mask = _prepare_4d_causal_attention_mask(
-            attention_mask,
-            (bsz, q_len),
-            hidden_states,
-            past_key_values_length,
-            sliding_window=None if self.config.sliding_window is None else self.config.sliding_window[self.layer_idx],
-        )
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -291,8 +395,19 @@ class P6Attention(nn.Module):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+            # kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += past_key_value[0].shape[-2]
+
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
@@ -380,6 +495,8 @@ class P6FlashAttention2(P6Attention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+        max_seqlen: int = None,
         **kwargs,
     ):
         if "padding_mask" in kwargs:
@@ -412,11 +529,18 @@ class P6FlashAttention2(P6Attention):
         else:
             kv_seq_len = cu_seqlens.diff().max().item()
 
-        # Because the input can be padded, the absolute sequence length depends on the max position id.
-        rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
-        cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
 
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         use_sliding_windows = (
             _flash_supports_window_size
@@ -516,6 +640,7 @@ class P6FlashAttention2(P6Attention):
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
             training=self.training,
             layer_number=self.layer_idx,
+            max_seqlen=max_seqlen,
         )
 
         if self.config.use_context_groupnorm:
@@ -548,6 +673,7 @@ class P6SdpaAttention(P6Attention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -563,6 +689,7 @@ class P6SdpaAttention(P6Attention):
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                position_embeddings=position_embeddings,
             )
 
         bsz, q_len, _ = hidden_states.size()
@@ -578,9 +705,18 @@ class P6SdpaAttention(P6Attention):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
 
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
@@ -631,25 +767,32 @@ P6_ATTENTION_CLASSES = {
 }
 
 
-class P6ExpertMLP(nn.Module):
+class P6Experts(nn.Module):
     def __init__(self, config: P6Config):
         super().__init__()
-
+        self.num_experts = config.moe_num_expert
         self.hidden_dim = config.hidden_size
         self.ffn_dim = int(config.intermediate_size)
-
-        self.fc1_1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
-        self.fc1_2 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
-        self.fc2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)
-
+        self.fc1_1 = torch.nn.Parameter(
+            torch.empty(self.num_experts, self.ffn_dim, self.hidden_dim),
+            requires_grad=True,
+        )
+        self.fc1_2 = torch.nn.Parameter(
+            torch.empty(self.num_experts, self.ffn_dim, self.hidden_dim),
+            requires_grad=True,
+        )
+        self.fc2 = torch.nn.Parameter(
+            torch.empty(self.num_experts, self.hidden_dim, self.ffn_dim),
+            requires_grad=True,
+        )
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, hidden_states):
-        fc1_1_out = self.fc1_1(hidden_states)
-        fc1_2_out = self.fc1_2(hidden_states)
+    def forward(self, expert_idx, hidden_states):
+        fc1_1_out = torch.matmul(hidden_states, self.fc1_1[expert_idx].transpose(0, 1))
+        fc1_2_out = torch.matmul(hidden_states, self.fc1_2[expert_idx].transpose(0, 1))
 
         fc1_out = self.act_fn(fc1_1_out) * fc1_2_out
-        out = self.fc2(fc1_out)
+        out = torch.matmul(fc1_out, self.fc2[expert_idx].transpose(0, 1))
         return out
 
 
@@ -765,15 +908,12 @@ class P6MoeBlock(nn.Module):
 
         # gating
         self.gate = P6TopkCapGate(config)
-
-        self.experts = nn.ModuleList([P6ExpertMLP(config) for _ in range(self.num_experts)])
+        self.experts = P6Experts(config)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         output_aux_losses: Optional[bool] = None,
-        image_idxs: torch.Tensor = None,
-        text_idxs: torch.Tensor = None,
     ) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -788,14 +928,13 @@ class P6MoeBlock(nn.Module):
 
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
-            expert_layer = self.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx])
 
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+            current_hidden_states = self.experts(expert_idx, current_state) * routing_weights[top_x, idx, None]
 
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
@@ -808,19 +947,13 @@ class P6MoeBlock(nn.Module):
         return final_hidden_states, router_logits, aux_loss
 
 
-class P6MoeBlockOpt(P6MoeBlock):
+class P6FusedMoeBlock(P6MoeBlock):
     def __init__(self, config) -> None:
         super().__init__(config)
         self.hidden_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
 
-        # TODO(wenyawei): check it
-        assert config.hidden_act == "silu", config.hidden_act
-
-        if config.use_image_expert:
-            self.image_expert = P6ExpertMLP(config)
-
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         output_aux_losses: Optional[bool] = None,
@@ -829,59 +962,29 @@ class P6MoeBlockOpt(P6MoeBlock):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # MOE Step 1: compute each token's weight for all experts.
-        # gate_logits shape (batch_size * sequence_len, num_experts)
-        gate_weights, gate_logits, aux_loss, _, selected_experts = self.gate(hidden_states, output_aux_losses)
+        # router_logits shape (batch_size * sequence_len, num_experts)
+        routing_weights, router_logits, aux_loss, _, selected_experts = self.gate(hidden_states, output_aux_losses)
 
         # MOE Step 2: compute experts with group gemm.
-        experts_out = fused_moe_forward(
-            self.experts,
+        final_hidden_states = fused_moe_forward(
             self.num_experts,
-            int(self.intermediate_size),  # TODO: enable config.moe_expert_eq_dim_factor?
-            self.hidden_dim,
-            gate_weights,
+            routing_weights,
             selected_experts,
             hidden_states,
+            self.experts.fc1_1,
+            self.experts.fc1_2,
+            self.experts.fc2,
         )
 
         # reshape output to input shape
-        experts_out = experts_out.reshape(batch_size, sequence_length, hidden_dim)
-
-        return experts_out, gate_logits, aux_loss
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output_aux_losses: Optional[bool] = None,
-        image_idxs: torch.Tensor = None,
-        text_idxs: torch.Tensor = None,
-    ) -> torch.Tensor:
-        if text_idxs is not None:
-            # hidden_states come from ln, its dtype is fp32.
-            # final_hidden_states_text&final_hidden_states_image is bf16, come from mlp
-            hidden_states_text = hidden_states[:, text_idxs]
-            final_hidden_states_text, router_logits, aux_loss = self.forward_native(
-                hidden_states_text, output_aux_losses
-            )
-            if len(image_idxs) > 0:
-                hidden_states_img = hidden_states[:, image_idxs]
-                final_hidden_states_image = self.image_expert(hidden_states_img)
-
-                final_hidden_states = torch.zeros_like(hidden_states).to(final_hidden_states_text.dtype)
-                final_hidden_states[:, text_idxs] = final_hidden_states_text[:]
-                final_hidden_states[:, image_idxs] = final_hidden_states_image[:]
-            else:
-                # text only
-                final_hidden_states = final_hidden_states_text
-
-        else:
-            final_hidden_states, router_logits, aux_loss = self.forward_native(hidden_states, output_aux_losses)
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 
         return final_hidden_states, router_logits, aux_loss
 
 
 P6_MOE_CLASSES = {
     "eager": P6MoeBlock,
-    "group_gemm": P6MoeBlockOpt,
+    "fused": P6FusedMoeBlock,
 }
 
 
@@ -933,6 +1036,8 @@ class P6DecoderLayer(nn.Module):
         output_router_logits: Optional[bool] = False,
         output_aux_losses: Optional[bool] = None,
         use_cache: Optional[bool] = False,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+        max_seqlen: Optional[int] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         if "padding_mask" in kwargs:
@@ -943,18 +1048,22 @@ class P6DecoderLayer(nn.Module):
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, sequence_length)` where padding elements are indicated by 0.
+            attention_mask (`torch.FloatTensor`, *optional*):
+                attention mask of size `(batch_size, sequence_length)` if flash attention is used or `(batch_size, 1,
+                query_sequence_length, key_sequence_length)` if default attention is used.
             output_attentions (`bool`, *optional*):
                 Whether or not to return the attentions tensors of all attention layers. See `attentions` under
                 returned tensors for more detail.
-            output_router_logits (`bool`, *optional*):
-                Whether or not to return the logits of all the routers. They are useful for computing the router loss, and
-                should not be returned during inference.
             use_cache (`bool`, *optional*):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+            position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
+                Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
+                with `head_dim` being the embedding dimension of each attention head.
+            kwargs (`dict`, *optional*):
+                Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
+                into the model
         """
 
         residual = hidden_states
@@ -970,6 +1079,7 @@ class P6DecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            position_embeddings=position_embeddings
         )
         hidden_states = residual + hidden_states
 
@@ -1152,8 +1262,9 @@ class P6Model(P6PreTrainedModel):
         self.h = nn.ModuleList([P6DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self._attn_implementation = config._attn_implementation
         self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
+        self.rotary_emb = P6RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1162,6 +1273,42 @@ class P6Model(P6PreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.wte = value
+
+    def _prepare_decoder_attention_mask(
+            self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+    ):
+        # create causal mask
+        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+        combined_attention_mask = None
+        if input_shape[-1] > 1:
+            combined_attention_mask = _make_causal_mask(
+                input_shape,
+                # inputs_embeds.dtype,
+                torch.float32,  # [MODIFIED] force to cast to float32
+                device=inputs_embeds.device,
+                past_key_values_length=past_key_values_length,
+            )
+
+        if attention_mask is not None:
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+            ).to(inputs_embeds.device)
+            combined_attention_mask = (
+                expanded_attn_mask
+                if combined_attention_mask is None
+                else expanded_attn_mask + combined_attention_mask
+            )
+
+
+        if hasattr(self, "tree_mask") and self.tree_mask is not None:
+            tree_mask = self.tree_mask
+            tree_len = tree_mask.size(-1)
+            combined_attention_mask[:, :, -tree_len:, -tree_len:][
+                tree_mask == 0
+                ] = combined_attention_mask.min()
+
+        return combined_attention_mask
 
     @add_start_docstrings_to_model_forward(P6_INPUTS_DOCSTRING)
     def forward(
@@ -1212,7 +1359,7 @@ class P6Model(P6PreTrainedModel):
                 )
                 use_cache = False
 
-        # assert not (use_cache and cu_seqlens is not None), "`cu_seqlens` is incompatible with `use_cache`"
+        assert not (use_cache and cu_seqlens is not None), "`cu_seqlens` is incompatible with `use_cache`"
 
         if past_key_values is not None:
             past_key_values_length = past_key_values[0][0].shape[2]
@@ -1227,8 +1374,9 @@ class P6Model(P6PreTrainedModel):
             position_ids = position_ids.view(-1, seq_length).long()
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.wte(input_ids)
 
+        inputs_embeds = self.embd_dropout(inputs_embeds)
 
         if attention_mask is not None and self._attn_implementation == "flash_attention_2" and use_cache:
             is_padding_right = attention_mask[:, -1].sum().item() != batch_size
@@ -1270,6 +1418,9 @@ class P6Model(P6PreTrainedModel):
 
         hidden_states = inputs_embeds
 
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -1297,6 +1448,8 @@ class P6Model(P6PreTrainedModel):
                     output_router_logits,
                     output_aux_losses,
                     use_cache,
+                    position_embeddings,
+                    max_seqlen=None,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -1309,6 +1462,8 @@ class P6Model(P6PreTrainedModel):
                     output_router_logits=output_router_logits,
                     output_aux_losses=output_aux_losses,
                     use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                    max_seqlen=None,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1320,7 +1475,7 @@ class P6Model(P6PreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
             if output_router_logits:
-                all_router_logits += (layer_outputs[-2 if all_aux_losses else -1],)
+                all_router_logits += (layer_outputs[-2 if output_aux_losses else -1],)
 
             if output_aux_losses:
                 all_aux_losses += (layer_outputs[-1],)
@@ -1843,24 +1998,24 @@ class P6ForTextEncoder(P6PreTrainedModel):
         self.transformer.wte = value
 
     def forward(
-            self,
-            input_ids: Optional[torch.LongTensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            cu_seqlens: Optional[torch.IntTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            output_router_logits: Optional[bool] = None,
-            output_aux_losses: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-            query_index: Optional[torch.LongTensor] = None,
-            doc_index: Optional[torch.LongTensor] = None,
-            return_embeddings: Optional[bool] = False,
-        ):
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.IntTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_router_logits: Optional[bool] = None,
+        output_aux_losses: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        query_index: Optional[torch.LongTensor] = None,
+        doc_index: Optional[torch.LongTensor] = None,
+        return_embeddings: Optional[bool] = False,
+    ):
         outputs = self.transformer(
             input_ids,
             attention_mask=attention_mask,
@@ -1877,7 +2032,7 @@ class P6ForTextEncoder(P6PreTrainedModel):
         )
         hidden_states = outputs[0]
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        
+
         embeddings = hidden_states[cu_seqlens[1:] - 1]
         if self.emb_head is not None:
             embeddings = self.emb_head(embeddings)
@@ -1909,22 +2064,17 @@ class P6ForTextEncoder(P6PreTrainedModel):
                         loss += self._partial_loss_and_backward(
                             curr_query_embeddings[..., :dim],
                             shadow_doc_embeddings[..., :dim],
-                            targets, weight,
+                            targets,
+                            weight,
                         )
                 else:
-                    loss = self._partial_loss_and_backward(
-                        curr_query_embeddings, shadow_doc_embeddings, targets)
+                    loss = self._partial_loss_and_backward(curr_query_embeddings, shadow_doc_embeddings, targets)
                 losses.append(loss)
 
-            num_querys = sum(query_num_list)
-            loss = sum(losses) / num_querys
-            query_embedding_grad = shadow_query_embeddings.grad / num_querys
-            doc_embeddings_grad = shadow_doc_embeddings.grad / num_querys
-            loss = FakeLoss.apply(
-                loss,
-                query_embeddings, query_embedding_grad,
-                doc_embeddings, doc_embeddings_grad
-            )
+            loss = sum(losses) / query_num
+            query_embedding_grad = shadow_query_embeddings.grad / query_num
+            doc_embeddings_grad = shadow_doc_embeddings.grad / query_num
+            loss = FakeLoss.apply(loss, query_embeddings, query_embedding_grad, doc_embeddings, doc_embeddings_grad)
 
         outputs = {"loss": loss}
         if return_embeddings:
@@ -1969,7 +2119,7 @@ class P6ForTextEncoder(P6PreTrainedModel):
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
 
         return loss
-    
+
     def _broadcast_embedding_iter(self, src_embedding: torch.Tensor, embedding_sizes):
         rank, world_size = dist.get_rank(), dist.get_world_size()
         assert len(embedding_sizes) == world_size
@@ -1995,6 +2145,7 @@ class P6ForTextEncoder(P6PreTrainedModel):
         next_work.wait()
         yield next_src, next_embeddings
 
+
 class _AsyncBroadcast(torch.autograd.Function):
     @staticmethod
     def forward(ctx, src, group, tensor):
@@ -2014,8 +2165,10 @@ class _AsyncBroadcast(torch.autograd.Function):
             gx.zero_()
         return (None, None, gx, None)
 
+
 def async_broadcast(tensor, src, group=dist.group.WORLD):
     return _AsyncBroadcast.apply(src, group, tensor)
+
 
 class FakeLoss(torch.autograd.Function):
     @staticmethod

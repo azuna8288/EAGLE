@@ -29,7 +29,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -49,6 +48,8 @@ except:
     from utils_c import *
     from choices import *
     from utils import prepare_logits_processor
+from .modeling_p6_kv import P6DecoderLayer
+
 top_k=10
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
@@ -463,41 +464,41 @@ class Model(nn.Module):
         self.vocab_size = config.vocab_size
 
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.wte = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if load_emb:
             from safetensors import safe_open
             import json
             try:
                 with open(os.path.join(path,"model.safetensors.index.json"),"r") as f:
                     index_json=json.loads(f.read())
-                    emb_path=index_json["weight_map"]["model.embed_tokens.weight"]
+                    emb_path=index_json["weight_map"]["transformer.wte.weight"]
                 with safe_open(os.path.join(path,emb_path),
                                framework="pt",
                                device="cpu") as f:
-                    tensor_slice = f.get_slice("model.embed_tokens.weight")
+                    tensor_slice = f.get_slice("transformer.wte.weight")
                     vocab_size, hidden_dim = tensor_slice.get_shape()
                     tensor = tensor_slice[:, :hidden_dim].float()
             except:
                 with open(os.path.join(path, "pytorch_model.bin.index.json"), "r") as f:
                     index_json = json.loads(f.read())
-                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                    emb_path = index_json["weight_map"]["transformer.wte.weight"]
                 weights=torch.load(os.path.join(path,emb_path))
-                tensor=weights["model.embed_tokens.weight"].float()
-            self.embed_tokens.weight.data = tensor
+                tensor=weights["transformer.wte.weight"].float()
+            self.wte.weight.data = tensor
 
 
         #self.init_tree()
 
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config,index) for index in range(config.num_hidden_layers)])
-        self.fc=nn.Linear(2*config.hidden_size,config.hidden_size,bias=bias)
+        self.h = nn.ModuleList([P6DecoderLayer(config,index) for index in range(config.num_hidden_layers)])
+        self.draft_token_proj=nn.Linear(2*config.hidden_size,config.hidden_size,bias=bias)
         self.act=ACT2FN[config.hidden_act]
-        for param in self.embed_tokens.parameters():
+        for param in self.wte.parameters():
             param.requires_grad = False
 
 
     def init_tree(self):
         self.tree = chain
-        self.tree_buffer=generate_tree_buffers(self.tree,self.embed_tokens.weight.device)
+        self.tree_buffer=generate_tree_buffers(self.tree,self.wte.weight.device)
 
 
     def reset(self):
@@ -556,7 +557,7 @@ class Model(nn.Module):
         past_key_values_length = 0
 
         with torch.no_grad():
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.wte(input_ids)
             #inputs_embeds = inputs_embeds.detach()
 
         # if std is not None:
@@ -590,13 +591,13 @@ class Model(nn.Module):
 
         #hidden_states=self.act(self.fc(torch.cat((inputs_embeds,hidden_states),dim=-1)))
         inputs_embeds=inputs_embeds.to(hidden_states.dtype)
-        hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+        hidden_states = self.draft_token_proj(torch.cat((inputs_embeds, hidden_states), dim=-1))
 
 
         all_hidden_states = () if output_hidden_states else None
         next_decoder_cache = () if use_cache else None
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for idx, decoder_layer in enumerate(self.h):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -906,9 +907,9 @@ class Model(nn.Module):
 class Vhead(nn.Module):
     def __init__(self,ins=6566,outs=32000):
         super().__init__()
-        self.fc = nn.Linear(ins,outs,bias=False)
+        self.draft_token_proj = nn.Linear(ins,outs,bias=False)
     def forward(self,x):
-        return self.fc(x)
+        return self.draft_token_proj(x)
 
 
 

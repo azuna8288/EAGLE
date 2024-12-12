@@ -1,0 +1,42 @@
+{
+  "_moe_implementation": "eager",
+  "architectures": [
+    "P6ForCausalLM"
+  ],
+  "attention_bias": true,
+  "attention_dropout": 0.0,
+  "bos_token_id": 0,
+  "embd_pdrop": 0.0,
+  "eos_token_id": 2,
+  "hidden_act": "silu",
+  "hidden_size": 3072,
+  "initializer_range": 0.016137431,
+  "interleaved_kv_shared": true,
+  "intermediate_size": 2048,
+  "layer_norm_eps": 1e-05,
+  "max_position_embeddings": 32768,
+  "model_type": "seed_p6",
+  "moe_expert_eq_dim_factor": 1.0,
+  "moe_freeze_gating": false,
+  "moe_num_expert": 32,
+  "moe_topk": 5,
+  "num_attention_heads": 24,
+  "num_hidden_layers": 1,
+  "num_key_value_heads": 4,
+  "output_aux_losses": false,
+  "output_router_logits": false,
+  "resid_pdrop": 0.2,
+  "rope_scaling": {
+    "factor": 1000,
+    "rope_type": "ntk"
+  },
+  "rope_theta": 10000.0,
+  "router_aux_loss_coef": 0.0,
+  "sliding_window": null,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.46.2",
+  "use_cache": true,
+  "use_context_groupnorm": true,
+  "use_key_layernorm": true,
+  "vocab_size": 155136
+}

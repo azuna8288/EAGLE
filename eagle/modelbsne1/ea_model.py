@@ -38,7 +38,7 @@ class EaModel(nn.Module):
 
         low_memory=False
 
-        device = base_model.model.layers[-1].self_attn.q_proj.weight.device
+        device = base_model.transformer.h[-1].attn.q_proj.weight.device
         if device!=base_model.lm_head.weight.device:
             self.ea_layer.diff_device = True
             if not low_memory:
@@ -106,7 +106,7 @@ class EaModel(nn.Module):
 
         with torch.inference_mode():
             # Pass input through the base model
-            outputs = self.base_model.model(
+            outputs = self.base_model.transformer(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
@@ -170,7 +170,7 @@ class EaModel(nn.Module):
 
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)
@@ -327,7 +327,7 @@ class EaModel(nn.Module):
 
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)

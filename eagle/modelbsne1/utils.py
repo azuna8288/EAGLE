@@ -219,15 +219,15 @@ def initialize_tree(input_ids, model, tree_attn_mask, past_key_values, logits_pr
         input_ids, past_key_values=past_key_values, output_orig=True, logits_processor=logits_processor,
         attention_mask=attention_mask, position_ids=position_ids
     )
-    model.base_model.model.tree_mask = tree_attn_mask
+    model.base_model.transformer.tree_mask = tree_attn_mask
     return tree_logits, logits, hidden_state, sample_token
 
 
 def reset_tree_mode(
         model,
 ):
-    model.base_model.model.tree_mask = None
-    model.base_model.model.tree_mode = None
+    model.base_model.transformer.tree_mask = None
+    model.base_model.transformer.tree_mode = None
 
 
 def reset_past_key_values(passed_key_values: List[torch.Tensor]) -> List[torch.Tensor]:

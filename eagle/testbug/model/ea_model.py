@@ -225,7 +225,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)

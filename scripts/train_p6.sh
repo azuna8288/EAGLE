@@ -1,0 +1,2 @@
+accelerate launch -m --main_process_port 1234 --mixed_precision=bf16 eagle.train.main --datapath data/ --basepath "/opt/tiger/mariana/EAGLE/241114_3b3_sft30_12b-kd-bo128_hf" --outdir ./output --configpath "/opt/tiger/mariana/EAGLE/eagle/train/p6_config.json"
+    

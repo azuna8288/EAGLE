@@ -1,30 +1,30 @@
 import argparse
+# import seed_models
 
 parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--basepath', type=str, default='/home/lyh/weights/hf/vicuna_v13/7B/')
+parser.add_argument('--basepath', type=str, default='/home/tiger/.cache/modelscope/hub/yiqunchen/vicuna-13b-v1.3')
 parser.add_argument('--configpath', type=str, default="config.json")
 parser.add_argument('--lr', type=float, default=3e-5)
 parser.add_argument('--bs', type=int, default=4)
 parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
-parser.add_argument('--tmpdir', type=str, default='0')
+parser.add_argument('--datapath', type=str, default='0')
 parser.add_argument('--outdir', type=str, default='0')
-parser.add_argument('--cpdir', type=str, default='0')
 args = parser.parse_args()
 
 train_config = {
     "lr": args.lr,
     "bs": args.bs,
     "gradient_accumulation_steps": args.gradient_accumulation_steps,
-    "datapath": f"{args.tmpdir}",
+    "datapath": f"{args.datapath}",
     "is_warmup": True,
-    "num_epochs": 20,
+    "num_epochs": 1,
     # Depending on your data and model size, the larger the model, the higher the sample efficiency. We recommend setting it between 20-40.
     "num_warmup_steps": 2000,
     "total_steps": 800000,
     "p_w": 0.1,
     "v_w": 1.0,
     "head_w": 0.1,
-    "num_workers": 2,
+    "num_workers": 8,
     "embeding": True,
     "act": "No",
     "data_noise": True,
@@ -55,7 +55,8 @@ set_seed(0)
 accelerator = Accelerator(mixed_precision='bf16',
                           gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
 from ..model.cnets import Model
-from ..model.configs import EConfig
+# from ..model.configs import EConfig
+from seed_models.models.p6.configuration_p6 import P6Config as EConfig
 from typing import Any, Dict, List
 
 from torch import nn, optim
@@ -311,15 +312,19 @@ train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=T
                           pin_memory=True)
 test_loader = DataLoader(testdataset, batch_size=train_config["bs"], shuffle=False,
                          collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"], pin_memory=True)
-# for batch_data in train_loader:
-#     print(batch_data)
+
+if accelerator.is_local_main_process:
+    wandb.log({"train_data_size": len(traindataset), "test_data_size": len(testdataset)})
 
 if accelerator.is_main_process:
-    if not os.path.exists(args.cpdir):
-        os.makedirs(args.cpdir)
+    if not os.path.exists(args.outdir):
+        os.makedirs(args.outdir)
 
 config = EConfig.from_pretrained(train_config["config_path"])
 model = Model(config, load_emb=True, path=args.basepath)
+
+if accelerator.is_local_main_process:
+    wandb.log({"model_param": sum(p.numel() for p in model.parameters())})
 
 criterion = nn.SmoothL1Loss(reduction="none")
 optimizer = optim.AdamW(model.parameters(), lr=train_config["lr"], betas=(train_config["b1"], train_config["b2"]))
@@ -341,6 +346,14 @@ else:
         model, head, optimizer, train_loader, test_loader
     )
 # accelerator.load_state("checkpoints/state_5")
+# if accelerator.is_local_main_process:
+#     os.makedirs(f"{args.outdir}/debug", exist_ok=True)
+
+#     torch.save(model.module.state_dict(), f"{args.outdir}/debug/model.pt")
+#     torch.save(head.state_dict(), f"{args.outdir}/debug/head.pt")
+
+# exit(0)
+
 for epoch in range(num_epochs + 1):
     top_3acc = [0 for _ in range(3)]
     correct = 0
@@ -478,7 +491,8 @@ for epoch in range(num_epochs + 1):
             print('Test Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
             print('Test Accuracy: {:.2f}%'.format(100 * correct / total))
             wandb.log({"test/epochacc": correct / total, "test/epochloss": epoch_loss})
-            # accelerator.save_model(model, f"checkpoints/model_{epoch}")
             # accelerator.save_state(output_dir=f"{args.outdir}/state_{epoch}")
-            # os.system(f"cp -r {args.outdir} {args.cpdir}")
-            accelerator.save_state(output_dir=f"{args.cpdir}/state_{epoch}")
+            os.makedirs(f"{args.outdir}/state_{epoch}", exist_ok=True)
+
+            torch.save(model.module.state_dict(), f"{args.outdir}/state_{epoch}/model.pt")
+            # torch.save(head.state_dict(), f"{args.outdir}/state_{epoch}/head.pt")

@@ -1,4 +1,11 @@
 # Byte-compiled / optimized / DLL files
+241114*
+data*/
+wandb/
+seed_tokenizer_resource*
+hub*
+output*
+
 __pycache__/
 *.py[cod]
 *$py.class
