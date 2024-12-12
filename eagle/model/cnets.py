@@ -496,7 +496,7 @@ class Model(nn.Module):
 
 
     def init_tree(self):
-        self.tree = mc_sim_7b_63
+        self.tree = chain
         self.tree_buffer=generate_tree_buffers(self.tree,self.embed_tokens.weight.device)
 
 
