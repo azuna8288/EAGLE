@@ -68,6 +68,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None,
     )
     new_token = 0
 
+    accept_length_list = []
     for idx in range(max_steps):
         candidates, cart_candidates_prob, tree_candidates = generate_candidates(
             tree_logits,
@@ -105,13 +106,16 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None,
             hidden_state_new,
             sample_p
         )
+        accept_length_list.append(accept_length)
         if tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
             break
         if new_token > 1024:
             break
         if input_ids.shape[1] > 1960:
             break
-    return input_ids, new_token, idx, alpha, alpha_num
+    # print(f"accepted_length: {sum(accept_length_list)/len(accept_length_list)}")
+    avg_accept_len = sum(accept_length_list)/len(accept_length_list)
+    return input_ids, new_token, idx, alpha, alpha_num, avg_accept_len
 
 
 def run_eval(
@@ -209,84 +213,17 @@ def get_model_answers(
     cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
     print('CUDA VISIBLE DEVICES:', cuda_visible_devices)
 
-    question = questions[0]
 
-    # warmup
-    for _ in range(3):
-        torch.manual_seed(0)
-
-        conv = get_conversation_template("llama-2-chat")
-        sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-        conv.system_message = sys_p
-        turns = []
-        idxs = []
-        new_tokens = []
-        wall_time = []
-        for j in range(len(question["turns"])):
-            qs = question["turns"][j]
-            conv.append_message(conv.roles[0], qs)
-            conv.append_message(conv.roles[1], None)
-            prompt = conv.get_prompt() + " "
-            input_ids = tokenizer([prompt]).input_ids
-
-            # try:
-            torch.cuda.synchronize()
-            start_time = time.time()
-
-            output_ids, new_token, idx, alpha, alpha_num = ea_forward(
-                torch.as_tensor(input_ids).cuda(),
-                model,
-                tokenizer,
-                tree_choices,
-                logits_processor,
-            )
-            torch.cuda.synchronize()
-            total_time = time.time() - start_time
-            output_ids = output_ids[0][len(input_ids[0]):]
-            # be consistent with the template's stop_token_ids
-            if conv.stop_token_ids:
-                stop_token_ids_index = [
-                    i
-                    for i, id in enumerate(output_ids)
-                    if id in conv.stop_token_ids
-                ]
-                if len(stop_token_ids_index) > 0:
-                    output_ids = output_ids[: stop_token_ids_index[0]]
-
-            output = tokenizer.decode(
-                output_ids,
-                spaces_between_special_tokens=False,
-            )
-            conv.stop_str = "</s>"
-            if conv.stop_str and output.find(conv.stop_str) > 0:
-                output = output[: output.find(conv.stop_str)]
-            for special_token in tokenizer.special_tokens_map.values():
-                if isinstance(special_token, list):
-                    for special_tok in special_token:
-                        output = output.replace(special_tok, "")
-                else:
-                    output = output.replace(special_token, "")
-            output = output.strip()
-
-            if conv.name == "xgen" and output.startswith("Assistant:"):
-                output = output.replace("Assistant:", "", 1).strip()
-
-            turns.append(output)
-            idxs.append(int(idx))
-            new_tokens.append(int(new_token))
-            wall_time.append(total_time)
-            conv.messages[-1][-1] = output
-    print('Warmup done')
-
-    # questions=questions[6:]
+    # questions=questions[:5]
+    avg_accept_len_list = []
     for question in tqdm(questions):
 
         choices = []
         for i in range(num_choices):
             torch.manual_seed(i)
             conv = get_conversation_template("llama-2-chat")
-            sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-            conv.system_message = sys_p
+            conv.system_message = ''
+            conv.sep2 = "</s>"
             turns = []
             idxs = []
             new_tokens = []
@@ -301,13 +238,14 @@ def get_model_answers(
                 #try:
                 torch.cuda.synchronize()
                 start_time = time.time()
-                output_ids, new_token, idx, alpha, alpha_num = ea_forward(
+                output_ids, new_token, idx, alpha, alpha_num, avg_accept_len = ea_forward(
                     torch.as_tensor(input_ids).cuda(),
                     model,
                     tokenizer,
                     tree_choices,
                     logits_processor,
                 )
+                avg_accept_len_list.append(avg_accept_len)
                 torch.cuda.synchronize()
                 total_time = time.time() - start_time
                 output_ids = output_ids[0][len(input_ids[0]):]
@@ -361,7 +299,7 @@ def get_model_answers(
                 "tstamp": time.time(),
             }
             fout.write(json.dumps(ans_json) + "\n")
-
+    print(sum(avg_accept_len_list)/len(avg_accept_len_list))
 
 def reorg_answer_file(answer_file):
     """Sort by question id and de-duplication"""
