@@ -56,15 +56,16 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.utils.import_utils import is_torch_fx_available
+from .kv_cache import KVCache
 
-from ...integrations.xperf import XperfGenerationMixin
-from ...utils import _flash_attention_forward, is_group_gemm_available, logging
-from ...utils.modeling_outputs import MoeModelOutputWithPastAndAuxLosses
-from .configuration_p6 import P6Config
+from seed_models.integrations.xperf import XperfGenerationMixin
+from seed_models.utils import _flash_attention_forward, is_fused_moe_available, logging
+from seed_models.utils.modeling_outputs import MoeModelOutputWithPastAndAuxLosses
+from seed_models.models.p6.configuration_p6 import P6Config
 
 
-if is_group_gemm_available():
-    from ...utils import _group_gemm_moe_forward
+if is_fused_moe_available():
+    from seed_models.utils import fused_moe_forward
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func
@@ -295,8 +296,10 @@ class P6Attention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            # cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            # key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states = past_key_value[0].cat(key_states, dim=2)
+            value_states = past_key_value[1].cat(value_states, dim=2)
 
         if self.config.use_key_layernorm:
             key_states = self.key_layernorm(key_states)
@@ -830,7 +833,7 @@ class P6MoeBlockOpt(P6MoeBlock):
         gate_weights, gate_logits, aux_loss, _, selected_experts = self.gate(hidden_states, output_aux_losses)
 
         # MOE Step 2: compute experts with group gemm.
-        experts_out = _group_gemm_moe_forward(
+        experts_out = fused_moe_forward(
             self.experts,
             self.num_experts,
             int(self.intermediate_size),  # TODO: enable config.moe_expert_eq_dim_factor?
@@ -885,7 +888,7 @@ P6_MOE_CLASSES = {
 class P6MLP(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
-        self.moe = P6_MOE_CLASSES[config.moe_implementation](config)
+        self.moe = P6_MOE_CLASSES[config._moe_implementation](config)
         self.dropout = nn.Dropout(config.resid_pdrop)
         self.layer_idx = layer_idx
         self.config = config
@@ -1209,37 +1212,23 @@ class P6Model(P6PreTrainedModel):
                 )
                 use_cache = False
 
-        assert not (use_cache and cu_seqlens is not None), "`cu_seqlens` is incompatible with `use_cache`"
+        # assert not (use_cache and cu_seqlens is not None), "`cu_seqlens` is incompatible with `use_cache`"
 
-        past_key_values_length = 0
-
-        if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+        if past_key_values is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
-            if cu_seqlens is None:
-                position_ids = torch.arange(
-                    past_key_values_length,
-                    seq_length + past_key_values_length,
-                    dtype=torch.long,
-                    device=device,
-                )
-                position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-            else:
-                host_seqlens = cu_seqlens.diff().cpu()
-                position_ids = torch.cat([torch.arange(l, dtype=torch.long, device=device) for l in host_seqlens])
-                position_ids = position_ids.unsqueeze(0)
+            position_ids = torch.arange(
+                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
             position_ids = position_ids.view(-1, seq_length).long()
 
         if inputs_embeds is None:
-            inputs_embeds = self.wte(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids)
 
-        inputs_embeds = self.embd_dropout(inputs_embeds)
 
         if attention_mask is not None and self._attn_implementation == "flash_attention_2" and use_cache:
             is_padding_right = attention_mask[:, -1].sum().item() != batch_size
@@ -1258,18 +1247,25 @@ class P6Model(P6PreTrainedModel):
             cu_seqlens is None or self._attn_implementation == "flash_attention_2"
         ), "`seqlens` is only supported in flash_attention_2"
 
-        if self._attn_implementation == "flash_attention_2":
-            # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        elif self._attn_implementation == "sdpa" and not output_attentions:
-            # output_attentions=True can not be supported when using SDPA, and we fall back on
-            # the manual implementation that requires a 4D causal mask in all cases.
-            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
-            )
+        # if self._attn_implementation == "flash_attention_2":
+        #     # 2d mask is passed through the layers
+        #     attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+        # elif self._attn_implementation == "sdpa" and not output_attentions:
+        #     # output_attentions=True can not be supported when using SDPA, and we fall back on
+        #     # the manual implementation that requires a 4D causal mask in all cases.
+        #     attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+        #         attention_mask,
+        #         (batch_size, seq_length),
+        #         inputs_embeds,
+        #         past_key_values_length,
+        #     )
+            
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask,
+            (batch_size, seq_length),
+            inputs_embeds,
+            past_key_values_length,
+        )
         # for _attn_implementation is "eager", no need to prepare attention mask here, but in attention step.
 
         hidden_states = inputs_embeds
@@ -1281,9 +1277,13 @@ class P6Model(P6PreTrainedModel):
         all_aux_losses = () if output_aux_losses else None
         next_decoder_cache = None
 
-        for decoder_layer in self.h:
+        for idx, decoder_layer in enumerate(self.h):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -1292,7 +1292,7 @@ class P6Model(P6PreTrainedModel):
                     attention_mask,
                     position_ids,
                     cu_seqlens,
-                    past_key_values,
+                    past_key_value,
                     output_attentions,
                     output_router_logits,
                     output_aux_losses,
@@ -1304,7 +1304,7 @@ class P6Model(P6PreTrainedModel):
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     cu_seqlens=cu_seqlens,
-                    past_key_value=past_key_values,
+                    past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     output_router_logits=output_router_logits,
                     output_aux_losses=output_aux_losses,
@@ -1331,9 +1331,9 @@ class P6Model(P6PreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        next_cache = None
-        if use_cache:
-            next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
+        next_cache = next_decoder_cache if use_cache else None
+        # if use_cache:
+        #     next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
