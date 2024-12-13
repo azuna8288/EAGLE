@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer,BitsAndBytesConfig
 import seed_models
 from datasets import load_dataset
 import json
-# from fastchat.model.model_adapter import get_conversation_template
+from fastchat.model.model_adapter import get_conversation_template
 
 bigname="/opt/tiger/mariana/EAGLE/EAGLE_files/241114_3b3_sft30_12b-kd-bo128_hf"
 # bigname = "/home/lyh/weights/hf/llama/7B/"
@@ -48,23 +48,23 @@ def build_dataset_rank(
             "loss_mask": []
         }
         for i in range(len(examples['id'])):
-            # conv = get_conversation_template("llama-2-chat")
+            conv = get_conversation_template("llama-2-chat")
             sys_p="You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-            # conv.system_message=sys_p
-            # roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-            # source= examples['conversations'][i]
-            # if roles[source[0]["from"]] != conv.roles[0]:
-            #     # Skip the first one if it is not from human
-            #     source = source[1:]
-            # conv.messages = []
-            # for j, sentence in enumerate(source):
-            #     role = roles[sentence["from"]]
-            #     assert role == conv.roles[j % 2], f"{i}"
-            #     if sentence["from"]=="gpt":
-            #         sentence["value"]=" "+sentence["value"]
-            #     conv.append_message(role, sentence["value"])
-            # conversation=conv.get_prompt()
-            conversation = sys_p
+            conv.system_message=sys_p
+            roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+            source= examples['conversations'][i]
+            if roles[source[0]["from"]] != conv.roles[0]:
+                # Skip the first one if it is not from human
+                source = source[1:]
+            conv.messages = []
+            for j, sentence in enumerate(source):
+                role = roles[sentence["from"]]
+                assert role == conv.roles[j % 2], f"{i}"
+                if sentence["from"]=="gpt":
+                    sentence["value"]=" "+sentence["value"]
+                conv.append_message(role, sentence["value"])
+            conversation=conv.get_prompt()
+            # conversation = sys_p
             # if i==56:
             #     print(i)
             # if i==57:
@@ -135,7 +135,7 @@ def build_dataset_rank(
     # dst.set_format(type="torch")
     return ds1
 
-bigtokenizer = AutoTokenizer.from_pretrained("/opt/tiger/mariana/EAGLE/EAGLE_files/hub/Mixtral-8x7B-Instruct-v0.1",use_fast=False)
+bigtokenizer = AutoTokenizer.from_pretrained(bigname,use_fast=False)
 ds = build_dataset_rank(bigtokenizer)
 print(ds)
 # quantization_config = BitsAndBytesConfig(

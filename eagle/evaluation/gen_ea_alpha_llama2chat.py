@@ -196,6 +196,10 @@ def get_model_answers(
         device_map="auto"
     )
 
+    model.tokenizer.padding_side = "left"
+    model.tokenizer.pad_token = model.tokenizer.eos_token
+    model.config.pad_token_id = model.config.eos_token_id
+
     tokenizer = model.get_tokenizer()
 
     if temperature > 1e-5:
