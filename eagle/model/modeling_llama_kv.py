@@ -724,7 +724,7 @@ class LlamaDecoderLayer(nn.Module):
         )
         hidden_states = residual + hidden_states
 
-        if hidden_states.dtype == torch.float16:
+        if hidden_states.dtype == torch.bfloat16:
             clamp_value = torch.where(
                 torch.isinf(hidden_states).any(),
                 torch.finfo(hidden_states.dtype).max - 1000,
@@ -737,7 +737,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        if hidden_states.dtype == torch.float16:
+        if hidden_states.dtype == torch.bfloat16:
             clamp_value = torch.where(
                 torch.isinf(hidden_states).any(),
                 torch.finfo(hidden_states.dtype).max - 1000,

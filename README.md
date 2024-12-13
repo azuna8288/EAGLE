@@ -133,7 +133,7 @@ from fastchat.model import get_conversation_template
 model = EaModel.from_pretrained(
     base_model_path=base_model_path,
     ea_model_path=EAGLE_model_path,
-    torch_dtype=torch.float16,
+    torch_dtype=torch.bfloat16,
     low_cpu_mem_usage=True,
     device_map="auto"
 )
@@ -173,7 +173,7 @@ from fastchat.model import get_conversation_template
 model = EaModel.from_pretrained(
     base_model_path=base_model_path,
     ea_model_path=EAGLE_model_path,
-    torch_dtype=torch.float16,
+    torch_dtype=torch.bfloat16,
     low_cpu_mem_usage=True,
     device_map="auto"
 )
@@ -235,7 +235,7 @@ from eagle.modeling_eagle import EAGLE
 from transformers import AutoModelForCausalLM,AutoTokenizer
 
 tokenizer=AutoTokenizer.from_pretrained(base_model_path)
-model=AutoModelForCausalLM.from_pretrained("base_model_path",torch_dtype=torch.float16,device_map="auto",)
+model=AutoModelForCausalLM.from_pretrained("base_model_path",torch_dtype=torch.bfloat16,device_map="auto",)
 # for bs>1, the padding side should be right
 if bs>1:
     tokenizer.padding_side = "left"
