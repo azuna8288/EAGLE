@@ -286,7 +286,7 @@ def getkacc(model, data, head, max_length=5):
                 single_input_ids = torch.cat((single_input_ids, torch.tensor([[token]]).to(single_input_ids.device)),
                                              dim=1)
 
-    acc = [correct[i] / total[i] for i in range(len(correct))]
+    acc = [correct[i] / max(total[i], 1) for i in range(len(correct))]
     return acc
 
 
