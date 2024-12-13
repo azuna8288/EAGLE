@@ -25,7 +25,7 @@ from model.utils_alpha import *
 from model.choices import *
 
 
-def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None, max_steps=512):
+def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None, max_steps=10):
     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
     # Avoid modifying the input_ids in-place
     input_ids = input_ids.clone()
@@ -39,7 +39,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None,
         tree_buffers = model.tree_buffers
     else:
         tree_buffers = generate_tree_buffers(
-            tree_choices, device=model.base_model.model.h[-1].attn.q_proj.weight.device
+            tree_choices, device=model.base_model.transformer.h[-1].attn.q_proj.weight.device
         )
     model.tree_buffers = tree_buffers
     model.tree_choices = tree_choices
@@ -85,7 +85,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None,
             tree_buffers["retrieve_indices"],
         )
         best_candidate, accept_length,sample_p = evaluate_posterior(
-                logits, candidates, logits_processor, cart_candidates_prob,alpha,alpha_num,tree_logits[2], tree_buffers["p_indices"],
+                logits.to(candidates.device), candidates, logits_processor, cart_candidates_prob,alpha,alpha_num,tree_logits[2], tree_buffers["p_indices"],
             tree_candidates, tree_buffers["b_indices"]
             )
         input_ids, tree_logits, new_token, hidden_state, sample_token = update_inference_inputs(

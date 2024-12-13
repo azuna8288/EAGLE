@@ -51,6 +51,7 @@ except:
     from utils import prepare_logits_processor
 top_k=10
 
+from transformers.cache_utils import Cache, DynamicCache
 from seed_models.models.p6.modeling_p6 import P6DecoderLayer
 
 
@@ -231,44 +232,33 @@ class Model(nn.Module):
         all_hidden_states = () if output_hidden_states else None
         next_decoder_cache = () if use_cache else None
 
+        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+
         for idx, decoder_layer in enumerate(self.h):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
-
-            if self.gradient_checkpointing and self.training:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        # None for past_key_value
-                        return module(*inputs, past_key_value, output_attentions)
-
-                    return custom_forward
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer),
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                )
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
 
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+        next_cache = None
+        use_legacy_cache = True
+        if use_cache:
+            next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
 
         if use_cache:
-            return hidden_states,next_decoder_cache
+            return hidden_states,next_cache
 
         return hidden_states
 

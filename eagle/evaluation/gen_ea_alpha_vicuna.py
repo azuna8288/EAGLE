@@ -45,7 +45,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None 
         tree_buffers = model.tree_buffers
     else:
         tree_buffers = generate_tree_buffers(
-            tree_choices, device=model.base_model.model.h[-1].attn.q_proj.weight.device
+            tree_choices, device=model.base_model.transformer.h[-1].attn.q_proj.weight.device
         )
     model.tree_buffers = tree_buffers
     model.tree_choices = tree_choices

@@ -48,7 +48,7 @@ class EaModel(nn.Module):
 
         low_memory=False
 
-        device = base_model.model.h[-1].attn.q_proj.weight.device
+        device = base_model.transformer.h[-1].attn.q_proj.weight.device
         if device!=base_model.lm_head.weight.device:
             self.ea_layer.diff_device = True
             if not low_memory:
@@ -108,6 +108,26 @@ class EaModel(nn.Module):
 
         return model
 
+    def convert_KVCache_list_to_legacy(self, past_key_values):
+        res = []
+        seq_len = past_key_values[0][0].current_length
+
+        if seq_len == 0:
+            return None
+        for past_key_value_layer in past_key_values:
+            res.append(
+                [
+                    past_key_value_layer[0].data[:, :, :seq_len, :],
+                    past_key_value_layer[1].data[:, :, :seq_len, :],
+                ]
+            )
+        return res
+
+    def merge_HFKV_to_KVCache(self, past_key_values, HF_past_key_values):
+        for i in range(len(past_key_values)):
+            past_key_values[i][0].cat(HF_past_key_values[i][0].data)
+            past_key_values[i][1].cat(HF_past_key_values[i][1].data)
+
     def forward(
             self,
             input_ids=None,
@@ -122,12 +142,16 @@ class EaModel(nn.Module):
 
         with torch.inference_mode():
             # Pass input through the base model
-            outputs = self.base_model.model(
+            HFKV = self.convert_KVCache_list_to_legacy(past_key_values)
+            outputs = self.base_model.transformer(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                past_key_values=past_key_values,
+                past_key_values=HFKV,
                 position_ids=position_ids,
+                use_cache=True
             )
+            self.merge_HFKV_to_KVCache(past_key_values, outputs.past_key_values)
+            del HFKV
             if output_orig:
                 orig = self.base_model.lm_head(outputs[0])
             hidden_states = outputs[0].clone()
@@ -176,7 +200,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.h[-1].attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)
@@ -276,7 +300,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.h[-1].attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)
@@ -380,7 +404,7 @@ class EaModel(nn.Module):
             tree_buffers = self.tree_buffers
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.h[-1].attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)

@@ -20,6 +20,7 @@ from model.ea_model import EaModel
 from model.kv_cache import initialize_past_key_values
 from model.utils import *
 from model.choices import *
+import seed_models
 
 
 def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None, max_steps=512):
@@ -32,7 +33,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None,
         tree_buffers = model.tree_buffers
     else:
         tree_buffers = generate_tree_buffers(
-            tree_choices, device=model.base_model.model.h[-1].attn.q_proj.weight.device
+            tree_choices, device=model.base_model.transformer.h[-1].attn.q_proj.weight.device
         )
         tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
             model.base_model.lm_head.weight.device)
