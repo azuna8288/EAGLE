@@ -48,7 +48,7 @@ from transformers.utils import (
 from transformers import MixtralConfig
 
 
-
+MixtralRMSNorm = nn.LayerNorm
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
@@ -185,24 +185,6 @@ def _get_unpad_data(attention_mask):
     )
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Mixtral
-class MixtralRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        MixtralRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-
 # Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Mixtral
 class MixtralRotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
@@ -334,6 +316,12 @@ class MixtralAttention(nn.Module):
             base=self.rope_theta,
         )
 
+        if self.config.use_key_layernorm:
+            self.key_layernorm = nn.LayerNorm(
+                self.head_dim,
+                eps=self.config.layer_norm_eps,
+            )
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
@@ -376,6 +364,12 @@ class MixtralAttention(nn.Module):
         if past_key_value is not None:
             key_states = past_key_value[0].cat(key_states, dim=2)
             value_states = past_key_value[1].cat(value_states, dim=2)
+
+        if self.config.use_key_layernorm:
+            key_states = self.key_layernorm(key_states)
+            # in fsdp training mode, the norm will be autocasted to float32
+            if key_states.dtype != query_states.dtype:
+                key_states = key_states.to(query_states.dtype)
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
