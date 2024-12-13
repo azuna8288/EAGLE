@@ -316,6 +316,10 @@ class MixtralAttention(nn.Module):
             base=self.rope_theta,
         )
 
+        if self.config.use_context_groupnorm:
+            self.context_norm = nn.LayerNorm(self.head_dim, eps=config.layer_norm_eps)
+
+
         if self.config.use_key_layernorm:
             self.key_layernorm = nn.LayerNorm(
                 self.head_dim,
@@ -403,6 +407,10 @@ class MixtralAttention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
+
+        if self.config.use_context_groupnorm:
+            attn_output = self.context_norm(attn_output)
+
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
