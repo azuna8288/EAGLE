@@ -521,7 +521,7 @@ class MixtralDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
+        self.attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
         self.block_sparse_moe = MixtralSparseMoeBlock(config)
         self.input_layernorm = MixtralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -564,7 +564,7 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -722,8 +722,8 @@ class MixtralModel(MixtralPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
+        self.wte = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.h = nn.ModuleList(
             [MixtralDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
@@ -734,10 +734,10 @@ class MixtralModel(MixtralPreTrainedModel):
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.embed_tokens
+        return self.wte
 
     def set_input_embeddings(self, value):
-        self.embed_tokens = value
+        self.wte = value
 
     def _prepare_decoder_attention_mask(
             self, attention_mask, input_shape, inputs_embeds, past_key_values_length
@@ -833,7 +833,7 @@ class MixtralModel(MixtralPreTrainedModel):
             position_ids = position_ids.view(-1, seq_length).long()
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.wte(input_ids)
 
         if attention_mask is not None and self._use_flash_attention_2 and use_cache:
             is_padding_right = attention_mask[:, -1].sum().item() != batch_size
@@ -864,7 +864,7 @@ class MixtralModel(MixtralPreTrainedModel):
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for idx, decoder_layer in enumerate(self.h):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -946,10 +946,10 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.model.embed_tokens
+        return self.model.wte
 
     def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
+        self.model.wte = value
 
     def get_output_embeddings(self):
         return self.lm_head
@@ -1103,10 +1103,10 @@ class MixtralForSequenceClassification(MixtralPreTrainedModel):
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.model.embed_tokens
+        return self.model.wte
 
     def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
+        self.model.wte = value
 
     @add_start_docstrings_to_model_forward(MIXTRAL_INPUTS_DOCSTRING)
     def forward(

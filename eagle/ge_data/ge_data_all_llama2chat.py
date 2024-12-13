@@ -15,35 +15,22 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer,BitsAndBytesConfig
+import seed_models
 from datasets import load_dataset
 import json
-from fastchat.model.model_adapter import get_conversation_template
+# from fastchat.model.model_adapter import get_conversation_template
 
-bigname="/home/hongyanz/scratch/weights/llama2chat/13B"
+bigname="/opt/tiger/mariana/EAGLE/EAGLE_files/241114_3b3_sft30_12b-kd-bo128_hf"
 # bigname = "/home/lyh/weights/hf/llama/7B/"
 # smallname = "/home/lyh/weights/hf/llama/7B/"
 
-
-
-def longest_common_prefix(list1, list2):
-    prefix_length = 0
-    min_length = min(len(list1), len(list2))
-
-    for i in range(min_length):
-        if list1[i] == list2[i]:
-            prefix_length += 1
-        else:
-            break
-
-    common_prefix = list1[:prefix_length]
-    return common_prefix, prefix_length
 
 
 def build_dataset_rank(
         tokenizer, split="train",
         select=None,
 ):
-    ds = load_dataset('json', data_files="/home/hongyanz/scratch/data/ShareGPT_V4.3_unfiltered_cleaned_split.json")
+    ds = load_dataset('Aeala/ShareGPT_Vicuna_unfiltered')
     ds = ds['train']
     ds = ds.shuffle(seed=42)
     ds1 = ds.select(range(args.start, args.end))
@@ -61,22 +48,23 @@ def build_dataset_rank(
             "loss_mask": []
         }
         for i in range(len(examples['id'])):
-            conv = get_conversation_template("llama-2-chat")
+            # conv = get_conversation_template("llama-2-chat")
             sys_p="You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-            conv.system_message=sys_p
-            roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-            source= examples['conversations'][i]
-            if roles[source[0]["from"]] != conv.roles[0]:
-                # Skip the first one if it is not from human
-                source = source[1:]
-            conv.messages = []
-            for j, sentence in enumerate(source):
-                role = roles[sentence["from"]]
-                assert role == conv.roles[j % 2], f"{i}"
-                if sentence["from"]=="gpt":
-                    sentence["value"]=" "+sentence["value"]
-                conv.append_message(role, sentence["value"])
-            conversation=conv.get_prompt()
+            # conv.system_message=sys_p
+            # roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+            # source= examples['conversations'][i]
+            # if roles[source[0]["from"]] != conv.roles[0]:
+            #     # Skip the first one if it is not from human
+            #     source = source[1:]
+            # conv.messages = []
+            # for j, sentence in enumerate(source):
+            #     role = roles[sentence["from"]]
+            #     assert role == conv.roles[j % 2], f"{i}"
+            #     if sentence["from"]=="gpt":
+            #         sentence["value"]=" "+sentence["value"]
+            #     conv.append_message(role, sentence["value"])
+            # conversation=conv.get_prompt()
+            conversation = sys_p
             # if i==56:
             #     print(i)
             # if i==57:
@@ -93,41 +81,34 @@ def build_dataset_rank(
             loss_mask=torch.ones_like(input_ids)
             #print(i)
 
-            sep = conv.sep + conv.roles[1] + " "
+            # sep = conv.sep + conv.roles[1] + " "
 
 
 
-            total_len = int(input_ids.ne(tokenizer.pad_token_id).sum())
+            # total_len = int(input_ids.ne(tokenizer.pad_token_id).sum())
 
-            turns = conversation.split(conv.sep2)
-            cur_len = 1
-            loss_mask[:cur_len] = 0
-            for i, turn in enumerate(turns):
-                if turn == "":
-                    break
-                turn_len = len(tokenizer(turn).input_ids)
+            # turns = conversation.split(conv.sep2)
+            # cur_len = 1
+            # loss_mask[:cur_len] = 0
+            # for i, turn in enumerate(turns):
+            #     if turn == "":
+            #         break
+            #     turn_len = len(tokenizer(turn).input_ids)
 
-                parts = turn.split(sep)
-                if len(parts) != 2:
-                    break
-                parts[0] += sep
-                # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+            #     parts = turn.split(sep)
+            #     if len(parts) != 2:
+            #         break
+            #     parts[0] += sep
 
-                # if i != 0 and not tokenizer.legacy:
-                #     # The legacy and non-legacy modes handle special tokens differently
-                #     instruction_len -= 1
+            #     instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-                # Ignore the user instructions
-                loss_mask[cur_len: cur_len + instruction_len] = 0
-                cur_len += turn_len
-                cur_len+=2
 
-                if i != 0 and not tokenizer.legacy:
-                    # The legacy and non-legacy modes handle special tokens differently
-                    cur_len -= 1
+            #     loss_mask[cur_len: cur_len + instruction_len] = 0
+            #     cur_len += turn_len
+            #     cur_len+=2
 
-            loss_mask[cur_len:] = 0
+
+            # loss_mask[cur_len:] = 0
 
 
 
@@ -154,7 +135,7 @@ def build_dataset_rank(
     # dst.set_format(type="torch")
     return ds1
 
-bigtokenizer = AutoTokenizer.from_pretrained(bigname,use_fast=False)
+bigtokenizer = AutoTokenizer.from_pretrained("/opt/tiger/mariana/EAGLE/EAGLE_files/hub/Mixtral-8x7B-Instruct-v0.1",use_fast=False)
 ds = build_dataset_rank(bigtokenizer)
 print(ds)
 # quantization_config = BitsAndBytesConfig(
@@ -165,7 +146,7 @@ print(ds)
 #     )
 # bigmodel = AutoModelForCausalLM.from_pretrained(bigname, load_in_4bit=True, device_map={"": 0}, )
 # smallmodel = AutoModelForCausalLM.from_pretrained(smallname, load_in_4bit=True, device_map={"": 1}, )
-bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="auto",torch_dtype=torch.float16)
+bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="auto",torch_dtype=torch.bfloat16)
 #bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="auto",load_in_8bit=True)
 bigmodel.eval()
 

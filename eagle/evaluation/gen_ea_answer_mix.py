@@ -32,7 +32,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None,
         tree_buffers = model.tree_buffers
     else:
         tree_buffers = generate_tree_buffers(
-            tree_choices, device=model.base_model.model.layers[-1].self_attn.q_proj.weight.device
+            tree_choices, device=model.base_model.model.h[-1].attn.q_proj.weight.device
         )
         tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
             model.base_model.lm_head.weight.device)
@@ -186,7 +186,7 @@ def get_model_answers(
         base_model_path=base_model_path,
         ea_model_path=ea_model_path,
         Type="Mixtral",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         # load_in_8bit=True,
         device_map="auto"

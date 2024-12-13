@@ -1,4 +1,5 @@
 import argparse
+import seed_models
 
 parser = argparse.ArgumentParser(description='sp')
 parser.add_argument('--basepath', type=str, default='/home/lyh/weights/hf/vicuna_v13/7B/')
@@ -341,6 +342,10 @@ else:
         model, head, optimizer, train_loader, test_loader
     )
 # accelerator.load_state("checkpoints/state_5")
+
+if accelerator.is_local_main_process:
+    os.makedirs(f"{args.cpdir}/for_debug", exist_ok=True)
+    torch.save(model.module.state_dict(), f"{args.cpdir}/for_debug/pytorch_model.bin")
 for epoch in range(num_epochs + 1):
     top_3acc = [0 for _ in range(3)]
     correct = 0
@@ -481,4 +486,6 @@ for epoch in range(num_epochs + 1):
             # accelerator.save_model(model, f"checkpoints/model_{epoch}")
             # accelerator.save_state(output_dir=f"{args.outdir}/state_{epoch}")
             # os.system(f"cp -r {args.outdir} {args.cpdir}")
-            accelerator.save_state(output_dir=f"{args.cpdir}/state_{epoch}")
+            # accelerator.save_state(output_dir=f"{args.cpdir}/state_{epoch}")
+            os.makedirs(f"{args.cpdir}/epoch_{epoch}", exist_ok=True)
+            torch.save(model.module.state_dict(), f"{args.cpdir}/epoch_{epoch}/pytorch_model.bin")

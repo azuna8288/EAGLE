@@ -2,6 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+241114*
+data*
+hub*
+output*
+wandb*
+EAGLE_files*
 
 # C extensions
 *.so
