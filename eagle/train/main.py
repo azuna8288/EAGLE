@@ -357,17 +357,16 @@ for epoch in range(num_epochs + 1):
 
         with accelerator.accumulate(model):
             optimizer.zero_grad()
-            predict = model(data["hidden_states"], input_ids=data["input_ids"], attention_mask=data["attention_mask"])
+            predict_hidden, logits = model(data["hidden_states"], input_ids=data["input_ids"], attention_mask=data["attention_mask"])
             with torch.no_grad():
                 target_head = head(data["target"])
                 target_p = nn.Softmax(dim=2)(target_head)
                 target_p = target_p.detach()
-            out_head = head(predict)
-            out_logp = nn.LogSoftmax(dim=2)(out_head)
+            out_logp = nn.LogSoftmax(dim=2)(logits)
             loss_mask = data["loss_mask"][:, :, None]
             plogp = target_p * out_logp
             ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
-            vloss = criterion(predict, data["target"])
+            vloss = criterion(predict_hidden, data["target"])
             vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()

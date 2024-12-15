@@ -494,6 +494,8 @@ class Model(nn.Module):
         for param in self.embed_tokens.parameters():
             param.requires_grad = False
 
+        self.lm_lora_down = nn.Linear(config.hidden_size, config.lm_head_lora_rank, bias=False)
+        self.lm_lora_up = nn.Linear(config.lm_head_lora_rank, config.vocab_size, bias=False)
 
     def init_tree(self):
         self.tree = mc_sim_7b_63
@@ -632,10 +634,12 @@ class Model(nn.Module):
             if use_cache:
                 next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
 
+        logits = self.lm_lora_up(self.lm_lora_down(hidden_states))
         if use_cache:
-            return hidden_states,next_decoder_cache
-
-        return hidden_states
+            return hidden_states,next_decoder_cache,logits
+        
+        logits = self.lm_lora_up(self.lm_lora_down(hidden_states))
+        return hidden_states, logits
 
     @torch.no_grad()
     def generate(self,hidden_states,input_ids,head,max_length=4,use_cache=False):
@@ -647,11 +651,12 @@ class Model(nn.Module):
             past_key_values=None
             for i in range(max_length):
                 if past_key_values!=None:
-                    out_hidden,past_key_values = self(out_hidden[:, -1:], input_ids=torch.tensor([[token]]).to(input_ids.device),past_key_values=past_key_values,use_cache=True)
+                    out_hidden,past_key_values,logits = self(out_hidden[:, -1:], input_ids=torch.tensor([[token]]).to(input_ids.device),past_key_values=past_key_values,use_cache=True)
                 else:
-                    out_hidden, past_key_values = self(hidden_states, input_ids=input_ids,use_cache=True)
-                last_hidden = out_hidden[:, -1]
-                last_headout = head(last_hidden)
+                    out_hidden, past_key_values,logits = self(hidden_states, input_ids=input_ids,use_cache=True)
+                # last_hidden = out_hidden[:, -1]
+                # last_headout = head(last_hidden)
+                last_headout = logits[:, -1, :]
                 token = torch.argmax(last_headout)
                 #input_ids = torch.cat((input_ids, torch.tensor([[token]]).to(input_ids.device)), dim=1)
                 return_input_ids.append(token.item())
@@ -660,9 +665,10 @@ class Model(nn.Module):
                 #hidden_states = torch.cat((hidden_states, out_hidden[:, -1:]), dim=1)
         else:
             for i in range(max_length):
-                out_hidden=self(hidden_states,input_ids=input_ids)
-                last_hidden = out_hidden[:, -1]
-                last_headout = head(last_hidden)
+                out_hidden, logits=self(hidden_states,input_ids=input_ids)
+                # last_hidden = out_hidden[:, -1]
+                # last_headout = head(last_hidden)
+                last_headout = logits[:, -1, :]
                 token = torch.argmax(last_headout)
                 return_input_ids.append(token.item())
                 input_ids = torch.cat((input_ids, torch.tensor([[token]]).to(input_ids.device)), dim=1)
@@ -772,9 +778,9 @@ class Model(nn.Module):
 
             if hasattr(self, "stable_kv") and self.stable_kv is not None:
                 kv_len=self.stable_kv[0][0].shape[2]
-                out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:,kv_len:], past_key_values=self.stable_kv,use_cache=True)
+                out_hidden, past_key_values, logits = self(hidden_states, input_ids=input_ids[:,kv_len:], past_key_values=self.stable_kv,use_cache=True)
             else:
-                out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
+                out_hidden, past_key_values, logits = self(hidden_states, input_ids=input_ids, use_cache=True)
             self.stable_kv=past_key_values
             last_hidden = out_hidden[:, -1]
             if not self.diff_device:
@@ -812,18 +818,22 @@ class Model(nn.Module):
                 #hidden_states = hidden_states.repeat(1,len_sq,1)
                 self.tree_mask=self.tree_buffer['attn_mask'][i]
                 position_ids=len_posi+self.tree_buffer["position_ids"][i]
-                out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, past_key_values=past_key_values,
+                out_hidden, past_key_values, logits = self(hidden_states, input_ids=input_ids, past_key_values=past_key_values,
                                                    position_ids=position_ids,use_cache=True)
                 len_posi += 1
 
                 if not self.diff_device:
-                    last_headout = head(out_hidden[0])
+                    # last_headout = head(out_hidden[0])
+                    last_headout = logits[0]
                 else:
                     if hasattr(self, "layer_device"):
-                        last_headout = head(out_hidden[0])
+                        # last_headout = head(out_hidden[0])
+                        last_headout = logits[0]
                         last_headout = last_headout.to(self.layer_device)
                     else:
-                        last_headout = F.linear(out_hidden[0], self.headweight)
+                        # last_headout = F.linear(out_hidden[0], self.headweight)
+                        last_headout = logits[0]
+                        last_headout = last_headout.to(self.layer_device)
                 #last_headout = head(out_hidden[0])
                 #sslogits.append(last_headout)
                 #print(select_index)
@@ -880,7 +890,7 @@ class Model(nn.Module):
                     tmp_sample_mask=sample_mask[i,single_hidden_states.shape[1]-1]
                     if not (target_in_token==tmp_token):
                         break
-                    out_hidden = self(single_hidden_states, input_ids=single_input_ids)
+                    out_hidden, logits = self(single_hidden_states, input_ids=single_input_ids)
                     last_hidden = out_hidden[:, -1]
                     last_headout = head(last_hidden)
                     token = torch.argmax(last_headout)

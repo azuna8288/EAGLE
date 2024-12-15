@@ -93,10 +93,10 @@ class EConfig(PretrainedConfig):
         pretraining_tp=1,
         tie_word_embeddings=False,
         rope_scaling=None,
-        low_rank=None,
+        lm_head_lora_rank=None,
         **kwargs,
     ):
-        self.low_rank=low_rank
+        self.lm_head_lora_rank=lm_head_lora_rank
 
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
