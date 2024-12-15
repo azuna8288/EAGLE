@@ -380,7 +380,7 @@ for epoch in range(num_epochs + 1):
         epoch_loss += loss.item()
         num_batches += 1
 
-        if batch_idx % 100 == 0:
+        if accelerator.is_local_main_process and batch_idx % 100 == 0:
             print('Train Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
 
     epoch_loss /= num_batches
