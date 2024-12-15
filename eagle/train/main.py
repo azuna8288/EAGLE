@@ -353,7 +353,7 @@ for epoch in range(num_epochs + 1):
     epoch_loss = 0
     num_batches = 0
     model.train()
-    for batch_idx, data in enumerate(tqdm(train_loader)):
+    for batch_idx, data in enumerate(train_loader):
 
         with accelerator.accumulate(model):
             optimizer.zero_grad()
@@ -377,117 +377,15 @@ for epoch in range(num_epochs + 1):
             if is_warmup:
                 scheduler.step()
 
-        
-
-        with torch.no_grad():
-            _, predicted = torch.max(out_head, 2)
-            _, target = torch.max(target_head, 2)
-            ct = loss_mask.sum().item()
-            cc = ((predicted == target) * loss_mask.squeeze()).sum().item()
-            out_head = out_head.view(-1, target_head.shape[-1])[loss_mask.view(-1) == 1]
-            target = target.view(-1)[loss_mask.view(-1) == 1]
-            topkacc = top_accuracy(out_head, target, (1, 2, 3))
-            for top_i in range(len(topkacc)):
-                top_3acc[top_i] += topkacc[top_i]
-            total += ct
-            correct += cc
-        if accelerator.is_main_process and ct != 0:
-            logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
-                       "train/ploss": ploss.item(), "train/loss": loss.item(), "train/acc": cc / ct}
-            for id, i in enumerate(top_3acc):
-                logdict[f'train/top_{id + 1}_acc'] = topkacc[id].item() / ct
-            wandb.log(logdict)
-            # for id,i in enumerate(top_3acc):
-            #     wandb.log({f'train/top_{id+1}_acc':topkacc[id].item()/ct})
-
-        del ploss, vloss
         epoch_loss += loss.item()
         num_batches += 1
 
-    correct, total = torch.tensor(correct).cuda(), torch.tensor(total).cuda()
-    correct, total = accelerator.gather_for_metrics((correct, total))
-    correct, total = correct.sum().item(), total.sum().item()
+        if batch_idx % 100 == 0:
+            print('Train Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
+
     epoch_loss /= num_batches
-    top_3acc = accelerator.gather_for_metrics(top_3acc)
     if accelerator.is_local_main_process:
-        for id, i in enumerate(top_3acc):
-            wandb.log({f'train/epochtop_{id + 1}_acc': i.sum().item() / total})
-    if accelerator.is_local_main_process:
-        print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
-        print('Train Accuracy: {:.2f}%'.format(100 * correct / total))
-        wandb.log({"train/epochacc": correct / total, "train/epochloss": epoch_loss})
-
-    if (epoch + 1) % train_config["save_freq"]:
-        top_3acc = [0 for _ in range(3)]
-        correct = 0
-        total = 0
-        epoch_loss = 0
-        num_batches = 0
-        model.eval()
-
-        k_acc = [[] for i in range(5)]
-        for batch_idx, data in enumerate(tqdm(test_loader)):
-            with torch.no_grad():
-                if batch_idx < 10:
-                    acces = getkacc(model, data, head, max_length=5)
-                    for i in range(len(acces)):
-                        k_acc[i].append(acces[i])
-                predict = model(data["hidden_states"], input_ids=data["input_ids"],
-                                attention_mask=data["attention_mask"])
-                target_head = head(data["target"])
-                target_p = nn.Softmax(dim=2)(target_head)
-                target_p = target_p.detach()
-                out_head = head(predict)
-                out_logp = nn.LogSoftmax(dim=2)(out_head)
-                loss_mask = data["loss_mask"][:, :, None]
-                plogp = target_p * out_logp
-                ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
-                vloss = criterion(predict, data["target"])
-                vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
-                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
-                _, predicted = torch.max(out_head, 2)
-                _, target = torch.max(target_head, 2)
-                ct = loss_mask.sum().item()
-                cc = ((predicted == target) * loss_mask.squeeze()).sum().item()
-                out_head = out_head.view(-1, target_head.shape[-1])[loss_mask.view(-1) == 1]
-                target = target.view(-1)[loss_mask.view(-1) == 1]
-                topkacc = top_accuracy(out_head, target, (1, 2, 3))
-                for top_i in range(len(topkacc)):
-                    top_3acc[top_i] += topkacc[top_i]
-                total += ct
-                correct += cc
-            epoch_loss += loss.item()
-            num_batches += 1
-
-        mean_acces = []
-        for id, i in enumerate(k_acc):
-            mean_acc = np.array(i).mean()
-            mean_acc = torch.tensor(mean_acc).cuda()
-            mean_acces.append(mean_acc)
-
-        mean_acces = accelerator.gather_for_metrics(mean_acces)
-        if accelerator.is_local_main_process:
-            for id, i in enumerate(mean_acces):
-                mean_acc = i.mean().item()
-                wandb.log({f"test/{id}_acc": mean_acc})
-
-        correct, total = torch.tensor(correct).cuda(), torch.tensor(total).cuda()
-        correct, total = accelerator.gather_for_metrics((correct, total))
-        correct, total = correct.sum().item(), total.sum().item()
-        top_3acc = accelerator.gather_for_metrics(top_3acc)
-        if accelerator.is_local_main_process:
-            for id, i in enumerate(top_3acc):
-                wandb.log({f'test/top_{id + 1}_acc': i.sum().item() / total})
-        epoch_loss /= num_batches
-        if accelerator.is_local_main_process:
-            print('Test Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
-            print('Test Accuracy: {:.2f}%'.format(100 * correct / total))
-            wandb.log({"test/epochacc": correct / total, "test/epochloss": epoch_loss})
-            # accelerator.save_model(model, f"checkpoints/model_{epoch}")
-            # accelerator.save_state(output_dir=f"{args.outdir}/state_{epoch}")
-            # os.system(f"cp -r {args.outdir} {args.cpdir}")
-            # accelerator.save_state(output_dir=f"{args.cpdir}/state_{epoch}")
-
-            os.makedirs(f"{args.cpdir}/latest", exist_ok=True)
-            torch.save(model.module.state_dict(), f"{args.cpdir}/latest/pytorch_model.bin")
-            os.system(f'cp {args.configpath} {args.cpdir}/latest/config.json')
+        print(f'Train Epoch [{epoch + 1}/{num_epochs}]: save to {args.cpdir}/latest')
+        os.makedirs(f"{args.cpdir}/latest", exist_ok=True)
+        torch.save(model.module.state_dict(), f"{args.cpdir}/latest/pytorch_model.bin")
+        os.system(f'cp {args.configpath} {args.cpdir}/latest/config.json')
