@@ -1,4 +1,9 @@
 # Byte-compiled / optimized / DLL files
+hub*
+data*
+output*
+wandb*
+
 __pycache__/
 *.py[cod]
 *$py.class

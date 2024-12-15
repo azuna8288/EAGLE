@@ -321,6 +321,11 @@ if accelerator.is_main_process:
 config = EConfig.from_pretrained(train_config["config_path"])
 model = Model(config, load_emb=True, path=args.basepath)
 
+if accelerator.is_local_main_process:
+    os.makedirs(f"{args.cpdir}/latest", exist_ok=True)
+    torch.save(model.state_dict(), f"{args.cpdir}/latest/pytorch_model.bin")
+    os.system(f'cp {args.configpath} {args.cpdir}/latest/config.json')
+
 criterion = nn.SmoothL1Loss(reduction="none")
 optimizer = optim.AdamW(model.parameters(), lr=train_config["lr"], betas=(train_config["b1"], train_config["b2"]))
 
@@ -481,4 +486,8 @@ for epoch in range(num_epochs + 1):
             # accelerator.save_model(model, f"checkpoints/model_{epoch}")
             # accelerator.save_state(output_dir=f"{args.outdir}/state_{epoch}")
             # os.system(f"cp -r {args.outdir} {args.cpdir}")
-            accelerator.save_state(output_dir=f"{args.cpdir}/state_{epoch}")
+            # accelerator.save_state(output_dir=f"{args.cpdir}/state_{epoch}")
+
+            os.makedirs(f"{args.cpdir}/latest", exist_ok=True)
+            torch.save(model.module.state_dict(), f"{args.cpdir}/latest/pytorch_model.bin")
+            os.system(f'cp {args.configpath} {args.cpdir}/latest/config.json')

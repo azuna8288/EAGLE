@@ -364,7 +364,7 @@ def get_model_answers(
 
         # Dump answers
         os.makedirs(os.path.dirname(answer_file), exist_ok=True)
-        with open(os.path.expanduser(answer_file), "a") as fout:
+        with open(os.path.expanduser(answer_file), "w") as fout:
             ans_json = {
                 "question_id": question["question_id"],
                 "answer_id": shortuuid.uuid(),

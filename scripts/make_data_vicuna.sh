@@ -1,0 +1,1 @@
+python3 -m eagle.ge_data.allocation --outdir data/

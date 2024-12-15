@@ -1,4 +1,4 @@
-torch==2.0.1
+# torch==2.0.1
 transformers==4.36.2
 accelerate==0.21.0
 fschat==0.2.31
@@ -8,3 +8,5 @@ anthropic==0.5.0
 sentencepiece==0.1.99
 protobuf==3.19.0
 wandb
+modelscope
+datasets

@@ -456,7 +456,7 @@ class Model(nn.Module):
         super().__init__()
 
 
-
+        self.config = config
 
         self.gradient_checkpointing = True
         self.padding_idx = config.pad_token_id

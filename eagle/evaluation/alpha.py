@@ -1,8 +1,17 @@
 import json
 import numpy as np
+import os
+
+
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--anwer_file_path', type=str, required=True)
+args = parser.parse_args()
+
 
 json_files=[
-    "/home/lyh/code/nlp/EAGLE/data/mt_bench/model_answer/vicuna-7b-alpha-temperature-0.0.jsonl",
+    args.anwer_file_path,
 ]
 
 
