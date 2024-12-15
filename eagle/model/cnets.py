@@ -451,6 +451,22 @@ class I(nn.Module):
 def len_list(x,n):
     return [i for i in x if len(i)<=n]
 
+class FeatureMixer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden, embedding):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(embedding)) * self.up_proj(hidden))
+        out = down_proj + hidden
+        return out
+
 class Model(nn.Module):
     def __init__(self,config,load_emb=False,path=None,bias=True):
         super().__init__()
@@ -489,7 +505,8 @@ class Model(nn.Module):
         #self.init_tree()
 
         self.layers = nn.ModuleList([LlamaDecoderLayer(config,index) for index in range(config.num_hidden_layers)])
-        self.fc=nn.Linear(2*config.hidden_size,config.hidden_size,bias=bias)
+        # self.fc=nn.Linear(2*config.hidden_size,config.hidden_size,bias=bias)
+        self.fc = FeatureMixer(config)
         self.act=ACT2FN[config.hidden_act]
         for param in self.embed_tokens.parameters():
             param.requires_grad = False
@@ -590,7 +607,8 @@ class Model(nn.Module):
 
         #hidden_states=self.act(self.fc(torch.cat((inputs_embeds,hidden_states),dim=-1)))
         inputs_embeds=inputs_embeds.to(hidden_states.dtype)
-        hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+        # hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+        hidden_states = self.fc(hidden_states, inputs_embeds)
 
 
         all_hidden_states = () if output_hidden_states else None
