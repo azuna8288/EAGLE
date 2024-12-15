@@ -291,6 +291,9 @@ def get_model_answers(
     print('Warmup done')
 
     #questions=questions[6:]
+    with open(os.path.expanduser(answer_file), "a") as fout:
+        pass
+
     for question in tqdm(questions):
 
 
@@ -364,7 +367,7 @@ def get_model_answers(
 
         # Dump answers
         os.makedirs(os.path.dirname(answer_file), exist_ok=True)
-        with open(os.path.expanduser(answer_file), "w") as fout:
+        with open(os.path.expanduser(answer_file), "a") as fout:
             ans_json = {
                 "question_id": question["question_id"],
                 "answer_id": shortuuid.uuid(),
