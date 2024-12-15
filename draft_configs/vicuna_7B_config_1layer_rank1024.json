@@ -19,5 +19,5 @@
   "transformers_version": "4.28.1",
   "use_cache": true,
   "vocab_size": 32000,
-  "low_rank": 1024
+  "lm_head_lora_rank": 1024
 }
