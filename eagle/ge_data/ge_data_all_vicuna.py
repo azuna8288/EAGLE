@@ -11,6 +11,14 @@ args = parser.parse_args()
 import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
+# cur_gpu_id = eval(str(args.gpu_index)[1:-1])
+# os.environ["CUDA_VISIBLE_DEVICES"] = f"{cur_gpu_id},{cur_gpu_id+1}"
+
+# print('$'*80)
+# print(os.environ["CUDA_VISIBLE_DEVICES"])
+
+import seed_models
+
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -19,10 +27,9 @@ from datasets import load_dataset
 import json
 from fastchat.model.model_adapter import get_conversation_template
 
-bigname=f"{os.environ['HOME_DIR']}/hub/vicuna-7b-v1.3"
+bigname=f"{os.environ['HOME_DIR']}/hub/P61_D73_8B_official"
 # bigname = "/home/lyh/weights/hf/llama/7B/"
 # smallname = "/home/lyh/weights/hf/llama/7B/"
-
 
 
 def longest_common_prefix(list1, list2):
@@ -52,7 +59,7 @@ def build_dataset_rank(
     # ds2=ds.select(range(300,len(ds)))
     original_columns1 = ds1.column_names
     # original_columns2 = ds2.column_names
-    num_proc = 4
+    num_proc = 8
 
     def preprocess_function(examples):
         new_examples = {
@@ -62,6 +69,7 @@ def build_dataset_rank(
         }
         for i in range(len(examples['id'])):
             conv = get_conversation_template("vicuna")
+            conv.roles = ('user', "assistant")
             roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
             source= examples['conversations'][i]
             if roles[source[0]["from"]] != conv.roles[0]:
@@ -80,7 +88,7 @@ def build_dataset_rank(
             input_ids = tokenizer(
                 conversation,
                 return_tensors="pt",
-                max_length=tokenizer.model_max_length,
+                max_length=4096,
                 truncation=True,
             ).input_ids[0]
             loss_mask=torch.ones_like(input_ids)
@@ -105,20 +113,13 @@ def build_dataset_rank(
                 # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-                if i != 0 and not tokenizer.legacy:
-                    # The legacy and non-legacy modes handle special tokens differently
-                    instruction_len -= 1
 
                 # Ignore the user instructions
                 loss_mask[cur_len: cur_len + instruction_len] = 0
                 cur_len += turn_len
 
-                if i != 0 and not tokenizer.legacy:
-                    # The legacy and non-legacy modes handle special tokens differently
-                    cur_len -= 1
 
             loss_mask[cur_len:] = 0
-
 
 
             new_examples["conversation"].append(conversation)
@@ -147,7 +148,7 @@ def build_dataset_rank(
 bigtokenizer = AutoTokenizer.from_pretrained(bigname,use_fast=False)
 ds = build_dataset_rank(bigtokenizer)
 print(ds)
-bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="auto",torch_dtype=torch.float16)
+bigmodel = AutoModelForCausalLM.from_pretrained(bigname,  device_map="auto",torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2")
 bigmodel.eval()
 
 

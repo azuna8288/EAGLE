@@ -13,7 +13,7 @@ e = 68000 - 1
 #e = 68 - 1
 gpus = [[0],[1],[2],[3],[4],[5],[6],[7]]
 
-# gpus=[[0],[1],[2],[3]]
+# gpus=[[0],[2],[4],[6]]
 num_p = len(gpus)
 outdir = '{}/sharegpt_{}_{}_mufp16'.format(args.outdir,s,e)
 
