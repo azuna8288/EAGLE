@@ -496,7 +496,7 @@ class EAGLEDecoderLayer(nn.Module):
     def __init__(self, config, index):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = EAGLEAttention(config=config)
+        self.attn = EAGLEAttention(config=config)
         self.mlp = EAGLEMLP(config)
         self.index = index
         if self.index != 0:
@@ -532,7 +532,7 @@ class EAGLEDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1258,7 +1258,7 @@ def forward_with_tree_mask(
 def initialize_tree(input_ids, model, logits_processor, attention_mask=None):
     position_ids = attention_mask.long().cumsum(-1) - 1
     position_ids.masked_fill_(attention_mask == 0, 1)
-    hidden_states, past_key_value = forward_with_tree_mask(model.base_model.model, input_ids=input_ids,
+    hidden_states, past_key_value = forward_with_tree_mask(model.base_model.transformer, input_ids=input_ids,
                                                            attention_mask=attention_mask, position_ids=position_ids)
     logits=model.base_model.lm_head(hidden_states)
 
@@ -1337,7 +1337,7 @@ def tree_decoding(
     attention_mask = torch.cat(
         (attention_mask, torch.ones_like(tree_candidates, device=attention_mask.device, dtype=attention_mask.dtype)), dim=1)
 
-    hidden_states, past_key_value = forward_with_tree_mask(model.base_model.model, input_ids=tree_candidates,past_key_values=past_key_values,
+    hidden_states, past_key_value = forward_with_tree_mask(model.base_model.transformer, input_ids=tree_candidates,past_key_values=past_key_values,
                                                            attention_mask=attention_mask, tree_mask=tree_mask,position_ids=position_ids)
 
     tree_logits = model.base_model.lm_head(hidden_states)
@@ -1602,7 +1602,7 @@ class EAGLE:
         ea_layer_state_dict = torch.load(load_model_path,
                                          map_location="cpu")
         self.ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
-        device = base_model.model.layers[-1].self_attn.q_proj.weight.device
+        device = base_model.transformer.h[-1].attn.q_proj.weight.device
         self.ea_layer.to(self.base_model.dtype).to(device)
         self.ea_layer.device = device
 
@@ -1652,7 +1652,7 @@ class EAGLE:
 
         else:
             tree_buffers = generate_tree_buffers(
-                tree_choices, device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device
+                tree_choices, device=self.base_model.transformer.h[-1].attn.q_proj.weight.device
             )
             tree_buffers["retrieve_indices_head"] = tree_buffers["retrieve_indices"].to(
                 self.base_model.lm_head.weight.device)

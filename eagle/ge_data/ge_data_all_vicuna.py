@@ -27,7 +27,7 @@ from datasets import load_dataset
 import json
 from fastchat.model.model_adapter import get_conversation_template
 
-bigname=f"{os.environ['HOME_DIR']}/hub/P61_D73_8B_official"
+bigname=f"{os.environ['HOME_DIR']}/hub/3b3_moe_p6"
 # bigname = "/home/lyh/weights/hf/llama/7B/"
 # smallname = "/home/lyh/weights/hf/llama/7B/"
 

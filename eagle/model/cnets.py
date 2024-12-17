@@ -470,19 +470,19 @@ class Model(nn.Module):
             try:
                 with open(os.path.join(path,"model.safetensors.index.json"),"r") as f:
                     index_json=json.loads(f.read())
-                    emb_path=index_json["weight_map"]["model.embed_tokens.weight"]
+                    emb_path=index_json["weight_map"]["transformer.wte.weight"]
                 with safe_open(os.path.join(path,emb_path),
                                framework="pt",
                                device="cpu") as f:
-                    tensor_slice = f.get_slice("model.embed_tokens.weight")
+                    tensor_slice = f.get_slice("transformer.wte.weight")
                     vocab_size, hidden_dim = tensor_slice.get_shape()
                     tensor = tensor_slice[:, :hidden_dim].float()
             except:
                 with open(os.path.join(path, "pytorch_model.bin.index.json"), "r") as f:
                     index_json = json.loads(f.read())
-                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                    emb_path = index_json["weight_map"]["transformer.wte.weight"]
                 weights=torch.load(os.path.join(path,emb_path))
-                tensor=weights["model.embed_tokens.weight"].float()
+                tensor=weights["transformer.wte.weight"].float()
             self.embed_tokens.weight.data = tensor
 
 

@@ -23,7 +23,7 @@ from fastchat.model import load_model, get_conversation_template
 
 
 import transformers
-
+import seed_models
 
 from ..model.utils_alpha import *
 from ..model.ea_model import EaModel
@@ -45,7 +45,7 @@ def ea_forward(input_ids, model, tokenizer, tree_choices, logits_processor=None 
         tree_buffers = model.tree_buffers
     else:
         tree_buffers = generate_tree_buffers(
-            tree_choices, device=model.base_model.model.layers[-1].self_attn.q_proj.weight.device
+            tree_choices, device=model.base_model.transformer.h[-1].attn.q_proj.weight.device
         )
     model.tree_buffers = tree_buffers
     model.tree_choices = tree_choices
@@ -218,77 +218,6 @@ def get_model_answers(
 
     question = questions[0]
 
-    # warmup
-    for _ in range(3):
-        torch.manual_seed(0)
-
-        conv = get_conversation_template("vicuna")
-        turns = []
-        idxs = []
-        new_tokens = []
-        wall_time = []
-        for j in range(len(question["turns"])):
-            qs = question["turns"][j]
-            conv.append_message(conv.roles[0], qs)
-            conv.append_message(conv.roles[1], None)
-            prompt = conv.get_prompt()
-            input_ids = tokenizer([prompt]).input_ids
-
-
-
-
-
-            # try:
-            torch.cuda.synchronize()
-            start_time = time.time()
-
-
-
-            output_ids, new_token, idx,alpha,alpha_num = ea_forward(
-                torch.as_tensor(input_ids).cuda(),
-                model,
-                tokenizer,
-                tree_choices,
-                logits_processor,
-            )
-            torch.cuda.synchronize()
-            total_time = time.time() - start_time
-            output_ids = output_ids[0][len(input_ids[0]) :]
-            # be consistent with the template's stop_token_ids
-            if conv.stop_token_ids:
-                stop_token_ids_index = [
-                    i
-                    for i, id in enumerate(output_ids)
-                    if id in conv.stop_token_ids
-                ]
-                if len(stop_token_ids_index) > 0:
-                    output_ids = output_ids[: stop_token_ids_index[0]]
-
-            output = tokenizer.decode(
-                output_ids,
-                spaces_between_special_tokens=False,
-            )
-            conv.stop_str="</s>"
-            if conv.stop_str and output.find(conv.stop_str) > 0:
-                output = output[: output.find(conv.stop_str)]
-            for special_token in tokenizer.special_tokens_map.values():
-                if isinstance(special_token, list):
-                    for special_tok in special_token:
-                        output = output.replace(special_tok, "")
-                else:
-                    output = output.replace(special_token, "")
-            output = output.strip()
-
-            if conv.name == "xgen" and output.startswith("Assistant:"):
-                output = output.replace("Assistant:", "", 1).strip()
-
-
-            turns.append(output)
-            idxs.append(int(idx))
-            new_tokens.append(int(new_token))
-            wall_time.append(total_time)
-            conv.messages[-1][-1] = output
-    print('Warmup done')
 
     #questions=questions[6:]
     with open(os.path.expanduser(answer_file), "a") as fout:
@@ -301,6 +230,7 @@ def get_model_answers(
         for i in range(num_choices):
             torch.manual_seed(i)
             conv = get_conversation_template("vicuna")
+            conv.roles = ('user', "assistant")
             turns = []
             idxs = []
             new_tokens = []
