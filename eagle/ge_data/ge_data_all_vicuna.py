@@ -18,6 +18,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
 # print(os.environ["CUDA_VISIBLE_DEVICES"])
 
 import seed_models
+from bytedance.seed_tokenizer import SeedTokenizer
 
 import torch
 import torch.nn.functional as F
@@ -46,6 +47,31 @@ def longest_common_prefix(list1, list2):
     return common_prefix, prefix_length
 
 
+def messages_to_input_ids(tokenizer, messages):
+    role_text_map = {
+        "system": "system",
+        "human": "user",
+        "gpt": "assistant",
+    }
+    role_split_text = "\n"
+
+    def single_message_token_length(message):
+
+        full_text = f"{tokenizer.bos_token}{role_text_map[message['from']]}" \
+                    f"{role_split_text}{message['value']}{tokenizer.eos_token}"
+
+        return full_text
+
+    prompt_text = ''
+    for message in messages:
+        text = single_message_token_length(message)
+        
+        prompt_text += text
+        response_text = text
+
+    return prompt_text, response_text
+
+
 def build_dataset_rank(
         tokenizer, split="train",
         select=None,
@@ -68,61 +94,72 @@ def build_dataset_rank(
             "loss_mask": []
         }
         for i in range(len(examples['id'])):
-            conv = get_conversation_template("vicuna")
-            conv.roles = ('user', "assistant")
-            roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-            source= examples['conversations'][i]
-            if roles[source[0]["from"]] != conv.roles[0]:
-                # Skip the first one if it is not from human
-                source = source[1:]
-            conv.messages = []
-            for j, sentence in enumerate(source):
-                role = roles[sentence["from"]]
-                assert role == conv.roles[j % 2], f"{i}"
-                conv.append_message(role, sentence["value"])
-            conversation=conv.get_prompt()
+            # conv = get_conversation_template("vicuna")
+            # conv.roles = ('user', "assistant")
+            # roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+            # source= examples['conversations'][i]
+            # if roles[source[0]["from"]] != conv.roles[0]:
+            #     # Skip the first one if it is not from human
+            #     source = source[1:]
+            # conv.messages = []
+            # for j, sentence in enumerate(source):
+            #     role = roles[sentence["from"]]
+            #     assert role == conv.roles[j % 2], f"{i}"
+            #     conv.append_message(role, sentence["value"])
+            # conversation=conv.get_prompt()
+            prompt_text, response_text = messages_to_input_ids(tokenizer, examples['conversations'][i])
             # if i==56:
             #     print(i)
             # if i==57:
             #     print(i)
             input_ids = tokenizer(
-                conversation,
+                prompt_text+response_text,
                 return_tensors="pt",
                 max_length=4096,
                 truncation=True,
             ).input_ids[0]
-            loss_mask=torch.ones_like(input_ids)
             #print(i)
+            # print(prompt_text+response_text)
+            # exit(0)
 
-            sep = conv.sep + conv.roles[1] + ": "
+            response_input_ids = tokenizer(
+                response_text,
+                return_tensors="pt",
+            ).input_ids[0]
+            
+            # print(input_ids.shape, response_input_ids.shape)
+            loss_mask=torch.zeros_like(input_ids)
+            loss_mask[response_input_ids.shape[0]:] = 1
 
-            total_len = int(input_ids.ne(tokenizer.pad_token_id).sum())
+            # sep = conv.sep + conv.roles[1] + ": "
 
-            turns = conversation.split(conv.sep2)
-            cur_len = 1
-            loss_mask[:cur_len] = 0
-            for i, turn in enumerate(turns):
-                if turn == "":
-                    break
-                turn_len = len(tokenizer(turn).input_ids)
+            # total_len = int(input_ids.ne(tokenizer.pad_token_id).sum())
 
-                parts = turn.split(sep)
-                if len(parts) != 2:
-                    break
-                parts[0] += sep
-                # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+            # turns = conversation.split(conv.sep2)
+            # cur_len = 1
+            # loss_mask[:cur_len] = 0
+            # for i, turn in enumerate(turns):
+            #     if turn == "":
+            #         break
+            #     turn_len = len(tokenizer(turn).input_ids)
 
-
-                # Ignore the user instructions
-                loss_mask[cur_len: cur_len + instruction_len] = 0
-                cur_len += turn_len
+            #     parts = turn.split(sep)
+            #     if len(parts) != 2:
+            #         break
+            #     parts[0] += sep
+            #     # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
+            #     instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
 
-            loss_mask[cur_len:] = 0
+            #     # Ignore the user instructions
+            #     loss_mask[cur_len: cur_len + instruction_len] = 0
+            #     cur_len += turn_len
 
 
-            new_examples["conversation"].append(conversation)
+            # loss_mask[cur_len:] = 0
+
+
+            new_examples["conversation"].append(prompt_text+response_text)
             new_examples["input_ids"].append(input_ids[None,:])
             new_examples["loss_mask"].append(loss_mask[None,:])
 

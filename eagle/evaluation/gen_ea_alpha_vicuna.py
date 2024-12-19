@@ -176,6 +176,18 @@ def run_eval(
         ray.get(ans_handles)
 
 
+def qs_to_input_ids(tokenizer, question):
+    role_split_text = "\n"
+
+
+    prompt_text = f"{tokenizer.bos_token}user" \
+                f"{role_split_text}{question}{tokenizer.eos_token}"\
+                f"{tokenizer.bos_token}assistant{role_split_text}"
+
+    return prompt_text
+
+
+
 @torch.inference_mode()
 def get_model_answers(
     base_model_path,
@@ -216,11 +228,9 @@ def get_model_answers(
     cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
     print('CUDA VISIBLE DEVICES:', cuda_visible_devices)
 
-    question = questions[0]
-
 
     #questions=questions[6:]
-    with open(os.path.expanduser(answer_file), "a") as fout:
+    with open(os.path.expanduser(answer_file), "w+") as fout:
         pass
 
     for question in tqdm(questions):
@@ -237,11 +247,13 @@ def get_model_answers(
             wall_time = []
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
-                conv.append_message(conv.roles[0], qs)
-                conv.append_message(conv.roles[1], None)
-                prompt = conv.get_prompt()
-                input_ids = tokenizer([prompt]).input_ids
+                # conv.append_message(conv.roles[0], qs)
+                # conv.append_message(conv.roles[1], None)
+                # prompt = conv.get_prompt()
+                # input_ids = tokenizer([prompt]).input_ids
 
+                prompt = qs_to_input_ids(tokenizer, qs)
+                input_ids = tokenizer([prompt]).input_ids
 
                 try:
                     torch.cuda.synchronize()
