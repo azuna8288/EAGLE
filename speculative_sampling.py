@@ -23,9 +23,10 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, target_l
     init_next_token = sample(target_outputs.logits[:, -1, :], temperature=temperature, top_p=top_p)
     
     fin_prompt_seq = torch.cat((fin_prompt_seq, init_next_token.unsqueeze(0)), dim=-1)
+    finished = False
+    accept_len_list = []
 
-
-    while n < target_len:
+    while n < target_len and not finished:
 
         N = fin_prompt_seq.shape[-1]
         # draft接收input_ids + 大模型生成的第一个token
@@ -43,7 +44,7 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, target_l
         draft_model_distribution = get_distribution(draft_logits, temperature)
 
         accepted_flag = 1
-        
+        accept_len = 0
         for t in range(step_size):
             numerator = target_model_distribution[:, t, draft_outputs[0, N+t]]
             denominator = draft_model_distribution[:, t, draft_outputs[0, N+t]]
@@ -56,7 +57,11 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, target_l
             if (uniform_distribution < torch.min(ones_tensor, ratio)).any():
                 fin_prompt_seq = torch.concat([fin_prompt_seq, draft_outputs[:, N+t].unsqueeze(dim=-1)], dim=-1)
                 n += 1
-
+                accept_len += 1
+                
+                if fin_prompt_seq[0][-1] == tokenizer.eos_token_id:
+                    finished = True
+                    break
             ## Rejection
             else:
                 new_dist = (target_model_distribution[:, t, :] - draft_model_distribution[:, t, :])
@@ -67,10 +72,15 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, target_l
                 accepted_flag = 0
                 break
 
+        accept_len_list.append(accept_len)
+
         if accepted_flag == 1:
             sample_token = sample(target_logits[:, -1, :], temperature=temperature, top_p=top_p)
             fin_prompt_seq = torch.concat([fin_prompt_seq, sample_token[None,...]], dim=-1)
-        
+
+            if fin_prompt_seq[0][-1] == tokenizer.eos_token_id:
+                finished = True
+                break
         
         target_outputs = target_model(fin_prompt_seq.to(target_model.device), output_hidden_states=True)
         target_hidden = target_outputs.hidden_states[-1]
@@ -80,4 +90,4 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, target_l
 
         n += 1
 
-    return fin_prompt_seq
+    return f"{tokenizer.decode(fin_prompt_seq[0], skip_special_tokens=True)}", accept_len_list

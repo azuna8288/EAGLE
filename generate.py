@@ -7,11 +7,12 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from speculative_sampling import speculative_sampling
 from eagle.model.ea_model import EaModel
+import json
 
 parser = argparse.ArgumentParser(description='Speculative Sampling')
 parser.add_argument('--method', default="speculative", help='Sampling Method (autogressive / speculative)')
-parser.add_argument('--prompt', default='Sampling Method (autogressive / speculative)', help='Input prompt')
-parser.add_argument('--max_new_tokens', type=int, default=1024, help='No. of max new tokens')
+parser.add_argument('--data_file', default='rd_test.jsonl', help='Input prompt')
+parser.add_argument('--max_new_tokens', type=int, default=4096, help='No. of max new tokens')
 parser.add_argument('--target_model', default="hub/3b3_moe_p6", help='Target model (HF Causal LM model)')
 parser.add_argument('--draft_model', default='output/latest', help='Draft model (HF Causal LM model)')
 parser.add_argument('--step_size', default=2, type=int, help='Step size')
@@ -44,9 +45,18 @@ draft_model = ea_model.ea_layer
 
 tokenizer = AutoTokenizer.from_pretrained(args.target_model)
 
+prompts = []
+with open(args.data_file, "r") as f:
+    for line in f.readlines():
+        line = json.loads(line)
+        prompts.append(line["prompt"][0])
 
-for prompt in tqdm(['<[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>user\n在中国双方订婚后分手，男方有权要回彩礼吗？<[EOS_never_used_51bce0c785ca2f68081bfa7d91973934]><[BOS_never_used_51bce0c785ca2f68081bfa7d91973934]>assistant\n']):
+accept_len_list = []
+
+for prompt in tqdm(prompts):
     
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    tokens = speculative_sampling(target_model, draft_model, initial_prompt_seq=inputs.input_ids, target_len=args.max_new_tokens+len(inputs.input_ids), tokenizer=tokenizer, temperature=args.temperature, top_p=args.top_p, debug=True)
-    
+    generated_text, curr_accept_len_list = speculative_sampling(target_model, draft_model, initial_prompt_seq=inputs.input_ids, target_len=args.max_new_tokens+len(inputs.input_ids), tokenizer=tokenizer, temperature=args.temperature, top_p=args.top_p, debug=False)
+    accept_len_list = [*accept_len_list, *curr_accept_len_list]
+    print(generated_text)
+    print(f'平均接受长度是 {len(accept_len_list)/len(accept_len_list):.3f} 接受次数为 {len(accept_len_list)}')
